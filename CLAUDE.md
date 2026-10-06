@@ -6,9 +6,12 @@ change it together with the types in `src/` and Sol's handlers.
 
 - Types here are shared on the wire: keep them backwards compatible within a
   minor version (new fields optional with `#[serde(default)]`).
-- The client is behind the `client` feature, so Sol doesn't pull in reqwest
-  twice and apps that only need the types stay small.
-- Sol's tests (`hub/crates/sol/src/tests.rs`) exercise the client end to end;
-  run them after changing either side.
+- Features keep Sol lean: `client` (HTTP), `keystore` (keyring), `app`
+  (both plus `link::Link`, the engine every world's app runs on).
+- `Link` is shared by every world: world-specific behaviour belongs in the
+  world's `Handler`, never here.
+- Sol's tests (`hub/crates/sol/src/tests.rs`) exercise the client and two
+  `Link` devices end to end; run them after changing either side.
 
-Checks: `cargo fmt && cargo clippy --all-targets --features client -- -D warnings && cargo test --features client`.
+Checks: `cargo fmt && cargo clippy --all-targets --features app -- -D warnings && cargo test --features app`
+(and once without features).

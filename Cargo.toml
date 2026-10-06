@@ -1,7 +1,7 @@
 [package]
 name = "orbit"
 description = "The protocol between Sol and its worlds, and the Rust client world apps use to reach Sol"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
@@ -13,12 +13,18 @@ publish = false
 
 [features]
 default = []
-# `orbit::client::Sol`, for world apps.
+# `orbit::client::Sol`: the protocol from a world app's side.
 client = ["dep:reqwest", "dep:thiserror", "tokio/time"]
+# `orbit::keystore`: secrets in the system keyring (or KWallet).
+keystore = ["dep:keyring", "dep:zbus"]
+# `orbit::link::Link`: everything a world's app needs: pairing, the token in
+# the keyring, a local copy of its data that works offline, and sync.
+app = ["client", "keystore", "tokio/macros"]
 
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
+keyring = { version = "4", optional = true }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"], optional = true }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rusqlite_migration = "2.6"
@@ -31,5 +37,10 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 utoipa = { version = "5", features = ["chrono", "uuid"] }
 uuid = { version = "1.27", features = ["v7", "serde"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# KWallet, for KDE sessions where the Secret Service answers but can't store.
+zbus = { version = "5", optional = true }
+
 [dev-dependencies]
+tempfile = "3"
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }

@@ -11,41 +11,51 @@ with Sol, the way a music player pairs with a Navidrome server.
 - **Shapes on the wire**, shared by Sol and the apps: world manifests
   (`sol-world.json`), documents and change pages, events, pairing, inbox
   deliveries and dashboard widgets.
-- **`orbit::client::Sol`** (feature `client`): pair, read settings, write and
-  sync documents, post events, read the inbox, push widgets.
+- **`orbit::link::Link`** (feature `app`): the whole engine a world's app runs
+  on. It pairs with a code approved in Sol, keeps the token in the system
+  keyring (or KWallet), keeps a local copy of the world's data that works
+  offline, sends local changes in order, takes in other devices' changes,
+  claims and runs what other worlds ask of it, and pushes widgets.
+- **`orbit::client::Sol`** (feature `client`): the protocol itself, request by
+  request.
+- **`orbit::keystore`** (feature `keystore`): secrets in the system keyring,
+  with a KWallet fallback for KDE (from Asonica).
 - **`orbit::db::Actor`**: SQLite on its own thread, for Sol's databases and an
-  app's local cache alike.
+  app's local copy alike.
 
 ## Use it in a world's app
 
 ```toml
 [dependencies]
-orbit = { git = "https://github.com/Draysh/sol-orbit", tag = "v0.2.0", features = ["client"] }
+orbit = { git = "https://github.com/Draysh/sol-orbit", tag = "v0.3.0", features = ["app"] }
 ```
 
 ```rust
-use std::time::Duration;
-use orbit::client::Sol;
+use orbit::link::{Config, Link, Tokens};
 
-let sol = Sol::new("https://sol.example.ts.net");
-let started = sol.pair("terra", "Desktop", Some("linux")).await?;
-// Show started.code; the person approves it in Sol.
-let paired = loop {
-    if let Some(paired) = sol.claim(&started, Duration::from_secs(25)).await? {
-        break paired;
-    }
-};
-let sol = sol.with_token(paired.token);
-sol.put("habits", "walk", serde_json::json!({ "name": "Walk outside" }), None).await?;
+let link = Link::open(Config {
+    world: "terra".into(),
+    dir: app_data_dir,
+    device: "Desktop".into(),
+    platform: Some("linux".into()),
+    tokens: Tokens::Keyring,
+})
+.await?;
+link.start(std::sync::Arc::new(MyWorld)); // MyWorld: orbit::link::Handler
+link.connect("https://sol.example.ts.net").await?; // Status::Pairing { code, .. }
+link.put("habits", "walk", serde_json::json!({ "name": "Walk outside" })).await?;
 ```
+
+New worlds start from [sol-planet-template](https://github.com/Draysh/sol-planet-template),
+a Tauri app already built on `Link`.
 
 ## Work on it
 
 ```sh
-cargo fmt && cargo clippy --all-targets --features client -- -D warnings && cargo test --features client
+cargo fmt && cargo clippy --all-targets --features app -- -D warnings && cargo test --features app
 ```
 
-Sol's tests drive the client against a real Sol end to end. Release by tagging
+Sol's tests drive the client and two `Link` devices against a real Sol end to end. Release by tagging
 (`v0.3.0`), then move the repositories over with Sol's `scripts/worlds.sh use-tags`.
 
 ## Licence

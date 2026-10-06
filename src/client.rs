@@ -124,6 +124,24 @@ impl Sol {
         json(self.req(Method::GET, "/api/v1/me")).await
     }
 
+    /// Unpairs this device; its token stops working.
+    pub async fn unpair(&self) -> Result<()> {
+        let res = self.req(Method::DELETE, "/api/v1/me").send().await?;
+        check(res).await.map(drop)
+    }
+
+    /// Whether `base` is a Sol, from its health check.
+    pub async fn probe(&self) -> Result<bool> {
+        let res = self.req(Method::GET, "/_sol/health").send().await?;
+        let body: serde_json::Value = check(res).await?.json().await?;
+        Ok(body["status"] == "ok" && body.get("db").is_some())
+    }
+
+    /// The address this client talks to.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     /// The world's settings as set in Sol, secrets included, defaults filled in.
     pub async fn settings(&self) -> Result<BTreeMap<String, serde_json::Value>> {
         json(self.req(Method::GET, "/api/v1/settings")).await
@@ -189,6 +207,20 @@ impl Sol {
             .timeout(wait + Duration::from_secs(10)),
         )
         .await
+    }
+
+    /// Claims a delivery for this device before acting on it. `false` means
+    /// another of the person's devices already took it.
+    pub async fn claim_delivery(&self, n: i64) -> Result<bool> {
+        let res = self
+            .req(Method::POST, &format!("/api/v1/inbox/{n}/claim"))
+            .send()
+            .await?;
+        match check(res).await {
+            Ok(_) => Ok(true),
+            Err(Error::Conflict { .. }) => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 
     /// Replaces one of the world's widgets on Sol's dashboard.

@@ -7,9 +7,10 @@
 //!
 //! This crate holds what both sides share: the shapes on the wire
 //! ([`world`], [`doc`], [`event`], [`device`], [`widget`]), the SQLite actor
-//! ([`db`]) and logging ([`telemetry`]). With the `client` feature it adds
-//! [`client::Sol`], the client a world app uses. `docs/protocol.md` describes
-//! the whole protocol.
+//! ([`db`]) and logging ([`telemetry`]). Features add the app side:
+//! `client` the HTTP client ([`client::Sol`]), `keystore` the system keyring,
+//! and `app` both plus [`link::Link`], the whole engine a world's app runs on.
+//! `docs/protocol.md` describes the protocol.
 
 pub mod db;
 pub mod device;
@@ -22,6 +23,10 @@ pub mod world;
 
 #[cfg(feature = "client")]
 pub mod client;
+#[cfg(feature = "keystore")]
+pub mod keystore;
+#[cfg(feature = "app")]
+pub mod link;
 
 pub use db::Actor;
 pub use doc::Doc;

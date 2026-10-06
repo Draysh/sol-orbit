@@ -5,7 +5,9 @@ the connections between worlds. Each world is an app of its own (a desktop
 app now, a phone app later) that pairs with Sol and works with its data there,
 the way a music player works with a Navidrome server.
 
-Orbit's `client` feature implements all of this as `orbit::client::Sol`; this
+Orbit implements all of this: `orbit::client::Sol` (feature `client`) speaks
+the protocol, and `orbit::link::Link` (feature `app`) runs it for a world's app,
+with the token in the keyring, a local copy that works offline, and sync. This
 page is for anyone writing a world in something else.
 
 ```
@@ -64,8 +66,9 @@ platform (`.AppImage`, `.deb`, `.rpm`, `.msi`, `.exe`, `.dmg`, `.apk`).
    `202` means not yet; `200` carries the `token`; `410` means start again.
 
 The token works for that world only. Keep it in the system keyring and send it
-as `Authorization: Bearer sol_…`. Each device can be unpaired on its own; a
-`401` means the app should pair again.
+as `Authorization: Bearer sol_…`. Each device can be unpaired on its own, in
+Sol or by the app itself with `DELETE /api/v1/me`; a `401` means the app should
+pair again.
 
 ## Data
 
@@ -112,6 +115,16 @@ the target world's inbox. The app reads it with
 
 Ticking a box in a widget on Sol's dashboard arrives the same way, as the
 action `widget.toggle` with `{ "widget", "item", "done" }`.
+
+A world's inbox is shared by all of the person's devices for that world, so
+before acting on a delivery an app claims it with
+`POST /api/v1/inbox/{n}/claim`: `204` means this device acts on it, `409`
+means another device already did. Claimed deliveries disappear from the other
+devices' inboxes.
+
+One delivery is for every device and is never claimed: `sol.settings`, sent
+when the person changes the world's settings in Sol. Read
+`GET /api/v1/settings` again when it arrives.
 
 ## Settings
 
