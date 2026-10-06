@@ -1,8 +1,10 @@
 //! SQLite access through a single-threaded actor.
 //!
 //! rusqlite is blocking, so each database lives on its own OS thread and async
-//! handlers send it closures. The actor is generic, so an app can hand it a
-//! richer owner than a bare `Connection` (for example Geode's stores).
+//! code sends it closures. Sol keeps every world's data this way, and a
+//! world's app can use the same actor for its local cache. The actor is
+//! generic, so it can own something richer than a bare `Connection` (for
+//! example Geode's stores).
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -98,7 +100,6 @@ fn prepare(mut conn: Connection, migrations: &Migrations) -> anyhow::Result<Conn
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(Duration::from_secs(5))?;
-    crate::event::ensure_outbox(&conn)?;
     migrations.to_latest(&mut conn)?;
     Ok(conn)
 }

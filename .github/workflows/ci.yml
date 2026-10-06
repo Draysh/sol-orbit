@@ -14,5 +14,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: rustup component add rustfmt clippy
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --locked
+      - run: cargo clippy --all-targets --features client --locked -- -D warnings
+      - run: cargo test --features client --locked

@@ -1,8 +1,10 @@
-//! What a dashboard widget route returns.
+//! A widget on Sol's dashboard.
 //!
-//! Sol's dashboard draws every app's widgets with the shared design
-//! components, so an app describes *what* to show and never ships widget code
-//! to Sol. Every field is optional; a widget uses whichever parts fit.
+//! A world's app pushes the latest look of each of its widgets to Sol
+//! (`PUT /api/v1/widgets/{id}`), and Sol's dashboard draws it with the shared
+//! design components, so a world describes *what* to show and never ships
+//! widget code to Sol. Every field is optional; a widget uses whichever parts
+//! fit.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -51,18 +53,11 @@ pub struct Item {
     /// Draws a checkbox when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done: Option<bool>,
-    /// What ticking the checkbox calls.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub toggle: Option<Toggle>,
-}
-
-/// Ticking a checklist item sends `{ "<field>": <new state> }` with `method`
-/// to `path` under the app's API, e.g. `PUT /api/terra/habits/1/today`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct Toggle {
-    pub method: String,
-    pub path: String,
-    pub field: String,
+    /// The box can be ticked from the dashboard. Sol then shows the new state
+    /// at once and puts a `widget.toggle` delivery in the world's inbox with
+    /// `{ "widget", "item", "done" }`, for the app to apply.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub toggle: bool,
 }
 
 impl WidgetView {
@@ -72,15 +67,5 @@ impl WidgetView {
             value: value.into(),
         });
         self
-    }
-}
-
-impl Toggle {
-    pub fn put(path: impl Into<String>, field: &str) -> Self {
-        Self {
-            method: "PUT".into(),
-            path: path.into(),
-            field: field.into(),
-        }
     }
 }

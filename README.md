@@ -1,46 +1,52 @@
 # Orbit
 
-The SDK every world of [Sol](https://github.com/Draysh/sol) is built on. An
-app hands `orbit::run` its manifest, migrations, routes, OpenAPI document and
-embedded web UI; Orbit supplies the rest:
+The protocol between [Sol](https://github.com/Draysh/sol) and its worlds, and
+the Rust client the worlds' apps use.
 
-- the `serve`, `healthcheck` and `openapi` subcommands, configured by environment;
-- logging, request IDs and graceful shutdown;
-- SQLite behind a one-thread actor, with migrations;
-- checks of the per-app tokens Sol signs (`User` and `System` extractors,
-  the person's time zone and "today");
-- the transactional event outbox and the `/_sol/*` endpoints Sol polls;
-- the `/ui/*` file server for the app's own pages;
-- `WidgetView`, the shape of a dashboard widget.
+Sol is the one server: it keeps every world's data, the person's settings and
+the connections between worlds. Each world is an app of its own that pairs
+with Sol, the way a music player pairs with a Navidrome server.
+[docs/protocol.md](docs/protocol.md) describes the whole protocol.
 
-[docs/app-contract.md](docs/app-contract.md) is the full contract between Sol
-and its apps.
+- **Shapes on the wire**, shared by Sol and the apps: world manifests
+  (`sol-world.json`), documents and change pages, events, pairing, inbox
+  deliveries and dashboard widgets.
+- **`orbit::client::Sol`** (feature `client`): pair, read settings, write and
+  sync documents, post events, read the inbox, push widgets.
+- **`orbit::db::Actor`**: SQLite on its own thread, for Sol's databases and an
+  app's local cache alike.
 
-## Use it
+## Use it in a world's app
 
 ```toml
 [dependencies]
-orbit = { git = "https://github.com/Draysh/sol-orbit", tag = "v0.1.0" }
+orbit = { git = "https://github.com/Draysh/sol-orbit", tag = "v0.2.0", features = ["client"] }
 ```
 
 ```rust
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    orbit::run("terra", spec(), Cli::parse().command).await
-}
-```
+use std::time::Duration;
+use orbit::client::Sol;
 
-New apps start from [sol-planet-template](https://github.com/Draysh/sol-planet-template),
-which is already wired up.
+let sol = Sol::new("https://sol.example.ts.net");
+let started = sol.pair("terra", "Desktop", Some("linux")).await?;
+// Show started.code; the person approves it in Sol.
+let paired = loop {
+    if let Some(paired) = sol.claim(&started, Duration::from_secs(25)).await? {
+        break paired;
+    }
+};
+let sol = sol.with_token(paired.token);
+sol.put("habits", "walk", serde_json::json!({ "name": "Walk outside" }), None).await?;
+```
 
 ## Work on it
 
 ```sh
-cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt && cargo clippy --all-targets --features client -- -D warnings && cargo test --features client
 ```
 
-Release by tagging (`v0.2.0`), then move the apps to the new tag with Sol's
-`scripts/worlds.sh use-tags`.
+Sol's tests drive the client against a real Sol end to end. Release by tagging
+(`v0.3.0`), then move the repositories over with Sol's `scripts/worlds.sh use-tags`.
 
 ## Licence
 
