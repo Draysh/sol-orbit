@@ -18,6 +18,7 @@
 //!     dir,
 //!     device: "Desktop".into(),
 //!     platform: Some("linux".into()),
+//!     version: "0.1.0".into(),
 //!     tokens: Tokens::Keyring,
 //! })
 //! .await?;
@@ -70,6 +71,8 @@ pub struct Config {
     pub device: String,
     /// `linux`, `windows`, `macos`, `android` or `ios`.
     pub platform: Option<String>,
+    /// The app's own version, e.g. `0.2.0`; Sol shows it under Devices.
+    pub version: String,
     pub tokens: Tokens,
 }
 
@@ -114,6 +117,8 @@ pub enum Update {
     Changed(Vec<String>),
     /// The world's settings in Sol changed.
     Settings,
+    /// News about the app's own updates (see [`crate::updates`]).
+    App(crate::updates::Status),
 }
 
 pub type Boxed<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -190,7 +195,9 @@ impl Link {
         };
         let state = match (meta.server, meta.user, token) {
             (Some(server), Some(user), Some(token)) => State::Paired {
-                client: Sol::new(server).with_token(token),
+                client: Sol::new(server)
+                    .with_version(&cfg.version)
+                    .with_token(token),
                 user,
                 online: false,
                 error: None,
@@ -263,7 +270,7 @@ impl Link {
     /// [`Status::Pairing`]. Finishes by itself once the person approves it.
     pub async fn connect(&self, server: &str) -> anyhow::Result<Status> {
         let server = normalise(server)?;
-        let probe = Sol::new(&server);
+        let probe = self.sol(&server);
         match probe.probe().await {
             Ok(true) => {}
             Ok(false) => bail!("{server} answered, but it isn't Sol"),
@@ -437,17 +444,39 @@ impl Link {
             .await??)
     }
 
-    // ---- Inside ------------------------------------------------------------
+    // ---- For the rest of orbit -----------------------------------------------
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.0.state.lock().expect("link state lock")
+    /// A preference of this device's own (`pref:` keys), kept when it pairs again.
+    pub(crate) async fn pref(&self, key: &'static str) -> Option<String> {
+        self.0.db.call(move |c| meta(c, key)).await.ok()?.ok()?
     }
 
-    fn client(&self) -> Option<Sol> {
+    pub(crate) async fn set_pref(&self, key: &'static str, value: &str) -> anyhow::Result<()> {
+        debug_assert!(key.starts_with("pref:"));
+        let value = value.to_owned();
+        self.0.db.call(move |c| set_meta(c, key, &value)).await??;
+        Ok(())
+    }
+
+    pub(crate) fn send(&self, update: Update) {
+        let _ = self.0.updates.send(update);
+    }
+
+    pub(crate) fn client(&self) -> Option<Sol> {
         match &*self.lock() {
             State::Paired { client, .. } => Some(client.clone()),
             _ => None,
         }
+    }
+
+    // ---- Inside ------------------------------------------------------------
+
+    fn sol(&self, server: &str) -> Sol {
+        Sol::new(server).with_version(&self.0.cfg.version)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.0.state.lock().expect("link state lock")
     }
 
     fn server(&self) -> Option<String> {
@@ -521,7 +550,7 @@ impl Link {
     }
 
     async fn wait_for_approval(&self, server: String, started: PairStarted) {
-        let client = Sol::new(&server);
+        let client = self.sol(&server);
         loop {
             if Utc::now() > started.expires_at {
                 return self.pairing_ended("the code expired; connect again for a new one");
@@ -562,7 +591,7 @@ impl Link {
             .call(move |c| -> rusqlite::Result<()> {
                 let tx = c.transaction()?;
                 // A new pairing starts from Sol's copy.
-                tx.execute_batch("DELETE FROM docs; DELETE FROM pending; DELETE FROM meta;")?;
+                tx.execute_batch("DELETE FROM docs; DELETE FROM pending; DELETE FROM meta WHERE key NOT LIKE 'pref:%';")?;
                 for (k, v) in [("server", server_s), ("device", device), ("user", user)] {
                     tx.execute(
                         "INSERT INTO meta (key, value) VALUES (?1, ?2)",
@@ -573,7 +602,7 @@ impl Link {
             })
             .await??;
         *self.lock() = State::Paired {
-            client: Sol::new(server).with_token(paired.token),
+            client: self.sol(server).with_token(paired.token),
             user: paired.user,
             online: true,
             error: None,
@@ -591,7 +620,7 @@ impl Link {
         }
         self.0
             .db
-            .call(|c| c.execute_batch("DELETE FROM docs; DELETE FROM pending; DELETE FROM meta;"))
+            .call(|c| c.execute_batch("DELETE FROM docs; DELETE FROM pending; DELETE FROM meta WHERE key NOT LIKE 'pref:%';"))
             .await??;
         *self.lock() = State::Unpaired { error };
         self.announce();
@@ -961,6 +990,12 @@ fn unpaired(err: &anyhow::Error) -> bool {
 fn friendly(err: &anyhow::Error) -> String {
     match err.downcast_ref::<ClientError>() {
         Some(ClientError::Transport(_)) => "Sol isn't answering".into(),
+        // Sol and this app speak different versions of the protocol.
+        Some(ClientError::Api {
+            status: 426,
+            message,
+            ..
+        }) => message.clone(),
         Some(ClientError::Api { message, .. }) => message.clone(),
         _ => err.to_string(),
     }
@@ -1035,6 +1070,7 @@ mod tests {
             dir: dir.path().to_owned(),
             device: "Test".into(),
             platform: None,
+            version: "0.1.0".into(),
             tokens: Tokens::File,
         })
         .await

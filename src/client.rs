@@ -60,6 +60,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Sol {
     base: String,
     token: Option<String>,
+    /// The app's own version, sent with every request.
+    version: Option<String>,
     http: reqwest::Client,
 }
 
@@ -69,6 +71,7 @@ impl Sol {
         Self {
             base: base.into().trim_end_matches('/').to_owned(),
             token: None,
+            version: None,
             http: reqwest::Client::builder()
                 .user_agent(concat!("orbit/", env!("CARGO_PKG_VERSION")))
                 .connect_timeout(Duration::from_secs(5))
@@ -79,6 +82,13 @@ impl Sol {
 
     pub fn with_token(mut self, token: impl Into<String>) -> Self {
         self.token = Some(token.into());
+        self
+    }
+
+    /// Tells Sol which version of the app is asking, so it can show it under
+    /// Devices and offer updates.
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
         self
     }
 
@@ -237,6 +247,22 @@ impl Sol {
         check(res).await.map(drop)
     }
 
+    /// Whether a newer version of this app is out, and the file to get it.
+    pub async fn update(&self, query: &crate::update::Query) -> Result<crate::update::Check> {
+        json(self.req(Method::GET, "/api/v1/update").query(query)).await
+    }
+
+    /// Starts downloading a file Sol offered (`Offer::download`); read the
+    /// body as it streams in.
+    pub async fn download(&self, path: &str) -> Result<Response> {
+        let res = self
+            .req(Method::GET, path)
+            .timeout(Duration::from_secs(30 * 60))
+            .send()
+            .await?;
+        check(res).await
+    }
+
     /// Takes one of the world's widgets off Sol's dashboard.
     pub async fn remove_widget(&self, id: &str) -> Result<()> {
         let res = self
@@ -250,7 +276,12 @@ impl Sol {
         let req = self
             .http
             .request(method, format!("{}{path}", self.base))
-            .timeout(Duration::from_secs(30));
+            .timeout(Duration::from_secs(30))
+            .header(crate::PROTOCOL_HEADER, crate::PROTOCOL);
+        let req = match &self.version {
+            Some(version) => req.header(crate::VERSION_HEADER, version),
+            None => req,
+        };
         match &self.token {
             Some(token) => req.bearer_auth(token),
             None => req,

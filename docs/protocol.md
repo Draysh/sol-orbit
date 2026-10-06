@@ -139,8 +139,39 @@ world's widgets on Sol's dashboard; `DELETE` takes it away. The view is a
 and `items` (a checklist when they have `done`; `toggle: true` lets people tick
 them from the dashboard). Push again whenever what it shows changes.
 
+## Versions and updates
+
+Every request from an app carries two headers:
+
+- `Sol-Protocol: 2`: the protocol it speaks (`orbit::PROTOCOL`). The number
+  goes up only for changes that break one side.
+- `Sol-App-Version: 0.2.0`: its own version; Sol shows it under Devices.
+
+`GET /_sol/health` says which protocols Sol speaks (`protocol`, the newest,
+and `min_protocol`). An app outside that range gets `426` with a message
+saying which side to update, on everything except `/api/v1/me` and
+`/api/v1/update*`, so an app that is too old can always update itself.
+
+Apps never ask GitHub for updates (the repositories can be private):
+
+1. `GET /api/v1/update?version=0.1.0&target=linux-x86_64&kind=portable`
+   (`kind`: `portable`, `setup`, `deb`, `rpm`; see `orbit::update`). Sol looks
+   at the world's latest GitHub release with its own token and answers
+   `{ latest, offer, message }`. `offer` is there when a newer version has a
+   signed file for that target and kind: `{ version, notes, file, size,
+   download, signature }`.
+2. `GET <offer.download>` streams the file through Sol.
+3. The app checks `signature` (minisign, as `tauri signer sign` writes it)
+   against the public key built into it, and only then installs.
+
+Release files are named `sol-<world>-<version>-<target><suffix>` with a
+`.sig` next to each: `.tar.gz` (the binary alone; installs and updates
+itself), `.deb`, `.rpm`, `-setup.exe`. `orbit::updates::Updates` does all of
+this for a Rust app.
+
 ## Errors
 
 Every error is `{ "error": "<code>", "message": "<a sentence for people>" }`
 with the matching status: `400` bad input, `401` not paired (any more), `404`
-missing, `409` conflict, `410` pairing gone, `429` too many tries.
+missing, `409` conflict, `410` pairing gone, `426` protocol mismatch, `429`
+too many tries.
