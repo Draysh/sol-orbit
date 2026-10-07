@@ -39,7 +39,7 @@ with Sol, the way a music player pairs with a Navidrome server.
 
 ```toml
 [dependencies]
-orbit = { git = "https://github.com/Draysh/sol-orbit", tag = "v0.6.0", features = ["app"] }
+orbit = { git = "https://github.com/Draysh/sol-orbit", tag = "v0.7.0", features = ["app"] }
 ```
 
 ```rust
@@ -68,7 +68,7 @@ cargo fmt && cargo clippy --all-targets --features app -- -D warnings && cargo t
 ```
 
 Sol's tests drive the client and two `Link` devices against a real Sol end to end. Release by tagging
-(`v0.6.0`), then move the repositories over with Sol's `scripts/worlds.sh use-tags`.
+(`v0.7.0`), then move the repositories over with Sol's `scripts/worlds.sh use-tags`.
 
 ## Licence
 

@@ -11,7 +11,8 @@
 //! `client` the HTTP client ([`client::Sol`]), `keystore` the system keyring,
 //! and `app` both plus [`link::Link`], the whole engine a world's app runs on,
 //! with [`install`] and [`updates`] for installing and updating itself,
-//! [`moons`] for moons that run with their planet, and on Linux [`frames`],
+//! [`moons`] for moons that run with their planet, [`doors`] for opening
+//! the other worlds' apps on the same computer, and on Linux [`frames`],
 //! so its window paints at the screen's rate, and [`mouse`], so the mouse's
 //! back and forward buttons reach the page.
 //! `docs/protocol.md` describes the protocol.
@@ -28,6 +29,8 @@ pub mod world;
 
 #[cfg(feature = "client")]
 pub mod client;
+#[cfg(feature = "app")]
+pub mod doors;
 #[cfg(all(feature = "app", target_os = "linux"))]
 pub mod frames;
 #[cfg(feature = "app")]

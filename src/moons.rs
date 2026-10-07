@@ -69,7 +69,7 @@ pub fn start(world: &str) -> Option<Running> {
     let base = base()?;
     let running = hold(&base, world);
     for bin in moons_of(&base, world) {
-        if let Err(err) = spawn(&bin) {
+        if let Err(err) = spawn(&bin, &[BACKGROUND]) {
             tracing::warn!(moon = %bin.display(), error = ?err, "couldn't start a moon");
         }
     }
@@ -150,7 +150,7 @@ pub fn unsettle(world: &str) {
 // ---- Inside ----------------------------------------------------------------
 
 /// The folder every Sol app on this computer shares, for the person alone.
-fn base() -> Option<PathBuf> {
+pub(crate) fn base() -> Option<PathBuf> {
     let var = |key: &str| {
         std::env::var_os(key)
             .filter(|v| !v.is_empty())
@@ -246,11 +246,13 @@ fn is_running(base: &Path, world: &str) -> bool {
     }
 }
 
-/// Starts a moon without a window, on its own: no terminal, and a process
-/// group of its own, so a Ctrl+C meant for the planet leaves it alone.
-fn spawn(bin: &Path) -> std::io::Result<()> {
+/// Starts an app on its own: no terminal, and a process group of its own,
+/// so a Ctrl+C meant for this one leaves it alone. With [`BACKGROUND`] a
+/// moon opens no window; with no arguments an app shows its window (or,
+/// running already, brings it up).
+pub(crate) fn spawn(bin: &Path, args: &[&str]) -> std::io::Result<()> {
     let mut cmd = Command::new(bin);
-    cmd.arg(BACKGROUND)
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -261,7 +263,7 @@ fn spawn(bin: &Path) -> std::io::Result<()> {
     }
     let mut child = cmd.spawn()?;
     // Reaped when it leaves (at once, when one was running already), so it
-    // never stays behind as a zombie of the planet.
+    // never stays behind as a zombie of the one that started it.
     std::thread::spawn(move || {
         let _ = child.wait();
     });

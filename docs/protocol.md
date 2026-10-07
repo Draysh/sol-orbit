@@ -39,6 +39,10 @@ world from GitHub.
   ],
   "settings": [
     { "key": "day_starts", "label": "Day starts at", "kind": "time", "default": "04:00" }
+  ],
+  "connections": [
+    { "when": "mercury.review.finished", "then_world": "terra", "then_action": "tick-habit",
+      "params": { "habit": "Japanese" }, "why": "A finished review ticks the Japanese habit." }
   ]
 }
 ```
@@ -55,6 +59,13 @@ world from GitHub.
   and sends each of them `sol.settings` when it changes. Use it for what the
   person would otherwise type twice, like the address and login of a server
   two worlds both talk to.
+- `connections`: the connections this world works best with, as Sol's
+  connection builder would make them (`when` is an event type, `then_world`
+  and `then_action` an installed world's action, `params` its parameters),
+  each with a `why` in one sentence. Sol offers them, on the world's page
+  and under Connections, once both worlds are installed, and makes one only
+  when the person says so. A moon lists the ones to and from its planet,
+  so nobody has to work out how the two talk.
 
 Installing a world in Sol gives it a database and lets its apps pair. Its
 releases on GitHub carry the app downloads, which Sol's world page offers per

@@ -32,6 +32,35 @@ pub struct WorldManifest {
     /// Settings people set once in Sol; every paired device reads them.
     #[serde(default)]
     pub settings: Vec<Setting>,
+    /// Connections this world works best with, offered in Sol once both
+    /// worlds are installed: a moon lists the ones to and from its planet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connections: Vec<Suggested>,
+}
+
+/// A connection a world suggests: "when this happens there, do that here"
+/// (or the other way round). Sol offers it, with `why`, wherever the person
+/// can make it in one click; nothing is connected without them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Suggested {
+    /// The event, e.g. `saturn.title.rated`; its world is the part before the first dot.
+    pub when: String,
+    /// The world whose action runs.
+    pub then_world: String,
+    /// Its action's id.
+    pub then_action: String,
+    /// The action's parameters, filled in.
+    #[serde(default, skip_serializing_if = "serde_json::Map::is_empty")]
+    pub params: serde_json::Map<String, serde_json::Value>,
+    /// One sentence on what it does for the person: `Titan learns what you rate.`
+    pub why: String,
+}
+
+impl Suggested {
+    /// The world the event comes from.
+    pub fn when_world(&self) -> &str {
+        self.when.split('.').next().unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]

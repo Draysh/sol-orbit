@@ -154,6 +154,7 @@ pub fn uninstall(app: &App) -> anyhow::Result<()> {
             ..
         } => {
             crate::moons::unsettle(app.world);
+            crate::doors::leave(app.world);
             linux::remove(app)
         }
         Here::Installed { kind, .. } => {
