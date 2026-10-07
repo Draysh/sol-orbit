@@ -23,6 +23,16 @@
 //! 60 a second (an even fraction of the screen's rate: 85 on 170 Hz), which
 //! [`full_rate`] turns off for a web view once it exists.
 //!
+//! The third cap, and on a driver with vertical blanks the one that matters,
+//! is GTK 3 itself. The window draws WebKit's frames with GL, and on Wayland
+//! GTK 3 then never asks the compositor for frame callbacks (it does only
+//! for the windows it commits itself), so its frame timings never learn the
+//! screen's refresh interval and its frame clock spaces paints by its
+//! built-in `FRAME_INTERVAL`, 16 667 µs: 60 a second, whatever WebKit makes.
+//! [`full_rate`] also tells the window's frame clock the monitor's real
+//! interval after every paint, so GTK paints at the screen's rate; the GL
+//! swap still waits for the compositor, which keeps it on the vblank.
+//!
 //! `WEBKIT_FORCE_VBLANK_TIMER=1` brings WebKit's 60 Hz timer back, to compare.
 //! The `frames` example builds this module alone as a shared library, to
 //! preload into a WebKitGTK window that isn't a world's app (sol-design's
@@ -152,7 +162,7 @@ struct Libdrm {
     free_crtc: Option<FreeCrtc>,
 }
 
-unsafe fn symbol<T: Copy>(handle: *mut c_void, name: &CStr) -> Option<T> {
+pub(crate) unsafe fn symbol<T: Copy>(handle: *mut c_void, name: &CStr) -> Option<T> {
     // SAFETY: dlsym takes a C string and returns a pointer or null; the
     // caller names the function's real type.
     let ptr = unsafe { libc::dlsym(handle, name.as_ptr()) };
@@ -419,11 +429,173 @@ type SetFeature = unsafe extern "C" fn(*mut c_void, *mut c_void, c_int);
 /// WebKit's own cap: page rendering updates kept near 60 a second.
 const NEAR_60: &CStr = c"PreferPageRenderingUpdatesNear60FPS";
 
+/// WebKit features [`full_rate`] turns off: the cap near 60 a second, and
+/// WebKitGTK 2.54's compositing of only the damaged region, which leaves
+/// the window's buffers holding different pictures of parts of the page
+/// that aren't changing: hovering a cover made it flash. Compositing the
+/// whole frame costs nothing measurable (157 against 159 frames a second
+/// scrolling on a 170 Hz screen).
+const OFF: [&CStr; 3] = [
+    NEAR_60,
+    c"UseDamagingInformationForCompositing",
+    c"PropagateDamagingInformation",
+];
+
+// GTK 3, for its frame clock.
+type GetFrameClock = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type GetWindow = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type CurrentTimings = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type WindowDisplay = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+type MonitorAt = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+type RefreshRate = unsafe extern "C" fn(*mut c_void) -> c_int;
+type MajorVersion = unsafe extern "C" fn() -> u32;
+type Connect = unsafe extern "C" fn(
+    *mut c_void,
+    *const c_char,
+    *mut c_void,
+    *mut c_void,
+    *mut c_void,
+    c_int,
+) -> std::ffi::c_ulong;
+type GetData = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void;
+type SetData = unsafe extern "C" fn(*mut c_void, *const c_char, *mut c_void);
+
+/// Where `refresh_interval` sits in GTK 3's private `GdkFrameTimings`: a
+/// `guint` (padded to 8) and six `gint64`s before it, unchanged since 3.8.
+const REFRESH_INTERVAL_AT: usize = 56;
+const PACED: &CStr = c"orbit-frames-paced";
+
+/// GTK 3's functions this needs, looked up once.
+struct Gtk3 {
+    frame_clock: GetFrameClock,
+    window: GetWindow,
+    timings: CurrentTimings,
+    display: WindowDisplay,
+    monitor_at: MonitorAt,
+    refresh_rate: RefreshRate,
+    connect: Connect,
+    get_data: GetData,
+    set_data: SetData,
+}
+
+fn gtk3() -> Option<&'static Gtk3> {
+    static GTK: OnceLock<Option<Gtk3>> = OnceLock::new();
+    GTK.get_or_init(|| {
+        // SAFETY: GTK's and GLib's own functions, by name, in a process that
+        // has them loaded (it runs a WebKitGTK view).
+        unsafe {
+            let major = symbol::<MajorVersion>(libc::RTLD_DEFAULT, c"gtk_get_major_version")?;
+            if major() != 3 {
+                return None;
+            }
+            Some(Gtk3 {
+                frame_clock: symbol(libc::RTLD_DEFAULT, c"gtk_widget_get_frame_clock")?,
+                window: symbol(libc::RTLD_DEFAULT, c"gtk_widget_get_window")?,
+                timings: symbol(libc::RTLD_DEFAULT, c"gdk_frame_clock_get_current_timings")?,
+                display: symbol(libc::RTLD_DEFAULT, c"gdk_window_get_display")?,
+                monitor_at: symbol(libc::RTLD_DEFAULT, c"gdk_display_get_monitor_at_window")?,
+                refresh_rate: symbol(libc::RTLD_DEFAULT, c"gdk_monitor_get_refresh_rate")?,
+                connect: symbol(libc::RTLD_DEFAULT, c"g_signal_connect_data")?,
+                get_data: symbol(libc::RTLD_DEFAULT, c"g_object_get_data")?,
+                set_data: symbol(libc::RTLD_DEFAULT, c"g_object_set_data")?,
+            })
+        }
+    })
+    .as_ref()
+}
+
+/// The monitor's refresh interval in microseconds, for the widget's window.
+///
+/// # Safety
+/// `widget` is a live, realized `GtkWidget`.
+unsafe fn refresh_interval(gtk: &Gtk3, widget: *mut c_void) -> Option<i64> {
+    // SAFETY: as the caller promises; every pointer comes from GTK.
+    unsafe {
+        let window = (gtk.window)(widget);
+        if window.is_null() {
+            return None;
+        }
+        let monitor = (gtk.monitor_at)((gtk.display)(window), window);
+        if monitor.is_null() {
+            return None;
+        }
+        let mhz = (gtk.refresh_rate)(monitor);
+        (mhz > 0).then(|| 1_000_000_000 / i64::from(mhz))
+    }
+}
+
+/// After each paint: the frame's timings learn the screen's interval, so
+/// the next frame may come that soon.
+unsafe extern "C" fn after_paint(clock: *mut c_void, widget: *mut c_void) {
+    let Some(gtk) = gtk3() else { return };
+    // SAFETY: GTK calls this on the main thread with its live clock, and
+    // `widget` (the web view) outlives its window's clock.
+    unsafe {
+        let timings = (gtk.timings)(clock);
+        if timings.is_null() {
+            return;
+        }
+        if let Some(interval) = refresh_interval(gtk, widget) {
+            *timings.cast::<u8>().add(REFRESH_INTERVAL_AT).cast::<i64>() = interval;
+        }
+    }
+}
+
+/// Once the web view has a frame clock, paces it (once per clock).
+unsafe extern "C" fn pace(widget: *mut c_void) {
+    let Some(gtk) = gtk3() else { return };
+    // SAFETY: a live widget on the main thread (a signal handler of its own,
+    // or the caller of `full_rate`).
+    unsafe {
+        let clock = (gtk.frame_clock)(widget);
+        if clock.is_null() || !(gtk.get_data)(clock, PACED.as_ptr()).is_null() {
+            return;
+        }
+        // Any non-null pointer marks it.
+        (gtk.set_data)(clock, PACED.as_ptr(), PACED.as_ptr().cast_mut().cast());
+        let handler: unsafe extern "C" fn(*mut c_void, *mut c_void) = after_paint;
+        (gtk.connect)(
+            clock,
+            c"after-paint".as_ptr(),
+            handler as *mut c_void,
+            widget,
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+    say("GTK paints at the screen's rate".into());
+}
+
+/// Paces the window's frame clock at the screen's rate, now if the web view
+/// is on screen, or else when it gets there.
+///
+/// # Safety
+/// `web_view` is a live `GtkWidget`, on the main thread.
+unsafe fn pace_gtk(web_view: *mut c_void) {
+    let Some(gtk) = gtk3() else { return };
+    // SAFETY: as the caller promises.
+    unsafe {
+        pace(web_view);
+        let handler: unsafe extern "C" fn(*mut c_void) = pace;
+        (gtk.connect)(
+            web_view,
+            c"map".as_ptr(),
+            handler as *mut c_void,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+        );
+    }
+}
+
 /// Lets a web view update its page at the screen's rate instead of a
-/// fraction near 60 a second, WebKit's default. `web_view` is a
-/// `WebKitWebView*` (a Tauri window's `with_webview` hands one out).
-/// Returns whether the preference was found; WebKitGTK before 2.42 has no
-/// way to set it.
+/// fraction near 60 a second, WebKit's default, and its window paint at
+/// that rate too (GTK 3's frame clock, see the module's notes); and turns
+/// off WebKitGTK 2.54's damage-only compositing, which makes still parts of
+/// the page flash ([`OFF`]). `web_view`
+/// is a `WebKitWebView*` (a Tauri window's `with_webview` hands one out).
+/// Returns whether WebKit's preference was found; WebKitGTK before 2.42 has
+/// no way to set it.
 ///
 /// # Safety
 ///
@@ -432,6 +604,7 @@ pub unsafe fn full_rate(web_view: *mut c_void) -> bool {
     // SAFETY: WebKitGTK's own functions, looked up by name in the process
     // that already runs the web view, with the pointers they hand out.
     unsafe {
+        pace_gtk(web_view);
         let Some(settings_of) =
             symbol::<ViewSettings>(libc::RTLD_DEFAULT, c"webkit_web_view_get_settings")
         else {
@@ -463,10 +636,13 @@ pub unsafe fn full_rate(web_view: *mut c_void) -> bool {
                 continue;
             }
             let id = identifier(feature);
-            if !id.is_null() && CStr::from_ptr(id) == NEAR_60 {
+            if id.is_null() {
+                continue;
+            }
+            let id = CStr::from_ptr(id);
+            if OFF.contains(&id) {
                 set(settings, feature, 0);
-                found = true;
-                break;
+                found |= id == NEAR_60;
             }
         }
         unref(features);

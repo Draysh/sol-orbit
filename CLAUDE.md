@@ -12,6 +12,9 @@ change it together with the types in `src/` and Sol's handlers.
   `build.rs` must export `drmWaitVBlank`, see `src/frames.rs`).
 - `Link` is shared by every world: world-specific behaviour belongs in the
   world's `Handler`, never here.
+- Moons (`moons`) and the planets that start them share a folder on the
+  computer (`sol-worlds` in the data folder): what's written there is read
+  by other apps' builds, so keep its shape (add fields with defaults).
 - Sol's tests (`hub/crates/sol/src/tests.rs`) exercise the client and two
   `Link` devices end to end; run them after changing either side.
 

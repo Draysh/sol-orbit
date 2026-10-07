@@ -26,12 +26,20 @@ with Sol, the way a music player pairs with a Navidrome server.
   the screen's rate. WebKitGTK falls back to a 60 Hz timer where the driver
   has no `drmWaitVBlank` (NVIDIA); the app exports its own, and turns off
   WebKit's preference for page updates near 60 a second.
+- **`orbit::moons`** (feature `app`): moons that run by themselves. An
+  installed moon writes down where it is; its planet's app starts it with
+  `--background` (no window) whenever the planet starts and holds a lock the
+  moon watches, and the moon leaves a little after the planet does. Nobody
+  has to remember to open Titan, Luna or Triton for their work to happen.
+- **`orbit::mouse`** (feature `app`, Linux): the mouse's back and forward
+  buttons, which WebKitGTK can't tell the page apart, passed on to it as a
+  `sol:navigate` event (sol-design's Shell goes back and forth on it).
 
 ## Use it in a world's app
 
 ```toml
 [dependencies]
-orbit = { git = "https://github.com/Draysh/sol-orbit", tag = "v0.5.0", features = ["app"] }
+orbit = { git = "https://github.com/Draysh/sol-orbit", tag = "v0.6.0", features = ["app"] }
 ```
 
 ```rust
@@ -60,7 +68,7 @@ cargo fmt && cargo clippy --all-targets --features app -- -D warnings && cargo t
 ```
 
 Sol's tests drive the client and two `Link` devices against a real Sol end to end. Release by tagging
-(`v0.5.0`), then move the repositories over with Sol's `scripts/worlds.sh use-tags`.
+(`v0.6.0`), then move the repositories over with Sol's `scripts/worlds.sh use-tags`.
 
 ## Licence
 

@@ -10,8 +10,10 @@
 //! ([`db`]) and logging ([`telemetry`]). Features add the app side:
 //! `client` the HTTP client ([`client::Sol`]), `keystore` the system keyring,
 //! and `app` both plus [`link::Link`], the whole engine a world's app runs on,
-//! with [`install`] and [`updates`] for installing and updating itself, and
-//! on Linux [`frames`], so its window paints at the screen's rate.
+//! with [`install`] and [`updates`] for installing and updating itself,
+//! [`moons`] for moons that run with their planet, and on Linux [`frames`],
+//! so its window paints at the screen's rate, and [`mouse`], so the mouse's
+//! back and forward buttons reach the page.
 //! `docs/protocol.md` describes the protocol.
 
 pub mod db;
@@ -34,6 +36,10 @@ pub mod install;
 pub mod keystore;
 #[cfg(feature = "app")]
 pub mod link;
+#[cfg(feature = "app")]
+pub mod moons;
+#[cfg(all(feature = "app", target_os = "linux"))]
+pub mod mouse;
 #[cfg(feature = "app")]
 pub mod updates;
 

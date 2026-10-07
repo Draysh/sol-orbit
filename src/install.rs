@@ -152,7 +152,10 @@ pub fn uninstall(app: &App) -> anyhow::Result<()> {
         Here::Installed {
             kind: Kind::Portable,
             ..
-        } => linux::remove(app),
+        } => {
+            crate::moons::unsettle(app.world);
+            linux::remove(app)
+        }
         Here::Installed { kind, .. } => {
             bail!("this copy came from a {kind:?} package; remove it the way it was installed")
         }

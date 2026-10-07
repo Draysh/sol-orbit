@@ -49,7 +49,12 @@ world from GitHub.
 - `actions`: what the world can do when a connection fires.
 - `settings`: set once in Sol, read by every paired device. Kinds are `text`,
   `url`, `secret` (handed only to the world's own devices, never shown again),
-  `number`, `toggle` and `time` (`HH:MM`).
+  `number`, `toggle` and `time` (`HH:MM`). A setting with `"shared":
+  "navidrome-url"` has one value for every world whose setting names the
+  same thing: set in any of them, Sol keeps it once, hands it to all of them
+  and sends each of them `sol.settings` when it changes. Use it for what the
+  person would otherwise type twice, like the address and login of a server
+  two worlds both talk to.
 
 Installing a world in Sol gives it a database and lets its apps pair. Its
 releases on GitHub carry the app downloads, which Sol's world page offers per
@@ -129,7 +134,8 @@ when the person changes the world's settings in Sol. Read
 ## Settings
 
 `GET /api/v1/settings` returns the world's settings as set in Sol, with
-defaults filled in and secrets included.
+defaults filled in and secrets included; a shared setting has the value set
+in whichever world it was set.
 
 ## Widgets
 

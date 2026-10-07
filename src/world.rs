@@ -66,6 +66,10 @@ pub struct Setting {
     pub hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
+    /// One value for every world that names the same thing (`navidrome-url`):
+    /// set in any of them, Sol keeps it once and hands it to all of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared: Option<String>,
 }
 
 /// A parameter of an action.
@@ -178,6 +182,14 @@ impl WorldManifest {
             {
                 out.push(format!("default of setting {:?}: {why}", s.key));
             }
+            if let Some(shared) = &s.shared
+                && !valid_id(shared)
+            {
+                out.push(format!(
+                    "shared name {shared:?} of setting {:?} must be lowercase letters, digits or dashes",
+                    s.key
+                ));
+            }
         }
         let mut actions = std::collections::HashSet::new();
         for a in &self.actions {
@@ -235,6 +247,8 @@ mod tests {
         m.emits[0].kind = "neptune.track.played".into();
         m.settings[0].default = Some(json!("25:00"));
         assert_eq!(m.problems().len(), 4, "{:?}", m.problems());
+        m.settings[0].shared = Some("Navidrome URL".into());
+        assert_eq!(m.problems().len(), 5, "{:?}", m.problems());
     }
 
     #[test]
