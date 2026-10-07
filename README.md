@@ -22,12 +22,16 @@ with Sol, the way a music player pairs with a Navidrome server.
   with a KWallet fallback for KDE (from Asonica).
 - **`orbit::db::Actor`**: SQLite on its own thread, for Sol's databases and an
   app's local copy alike.
+- **`orbit::frames`** (feature `app`, Linux): the app's window painting at
+  the screen's rate. WebKitGTK falls back to a 60 Hz timer where the driver
+  has no `drmWaitVBlank` (NVIDIA); the app exports its own, and turns off
+  WebKit's preference for page updates near 60 a second.
 
 ## Use it in a world's app
 
 ```toml
 [dependencies]
-orbit = { git = "https://github.com/Draysh/sol-orbit", tag = "v0.3.0", features = ["app"] }
+orbit = { git = "https://github.com/Draysh/sol-orbit", tag = "v0.5.0", features = ["app"] }
 ```
 
 ```rust
@@ -56,7 +60,7 @@ cargo fmt && cargo clippy --all-targets --features app -- -D warnings && cargo t
 ```
 
 Sol's tests drive the client and two `Link` devices against a real Sol end to end. Release by tagging
-(`v0.3.0`), then move the repositories over with Sol's `scripts/worlds.sh use-tags`.
+(`v0.5.0`), then move the repositories over with Sol's `scripts/worlds.sh use-tags`.
 
 ## Licence
 

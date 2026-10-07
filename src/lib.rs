@@ -10,7 +10,8 @@
 //! ([`db`]) and logging ([`telemetry`]). Features add the app side:
 //! `client` the HTTP client ([`client::Sol`]), `keystore` the system keyring,
 //! and `app` both plus [`link::Link`], the whole engine a world's app runs on,
-//! with [`install`] and [`updates`] for installing and updating itself.
+//! with [`install`] and [`updates`] for installing and updating itself, and
+//! on Linux [`frames`], so its window paints at the screen's rate.
 //! `docs/protocol.md` describes the protocol.
 
 pub mod db;
@@ -25,6 +26,8 @@ pub mod world;
 
 #[cfg(feature = "client")]
 pub mod client;
+#[cfg(all(feature = "app", target_os = "linux"))]
+pub mod frames;
 #[cfg(feature = "app")]
 pub mod install;
 #[cfg(feature = "keystore")]
