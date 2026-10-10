@@ -44,15 +44,27 @@ pub struct ChangePage {
     pub next: i64,
     /// More changes are waiting; ask again straight away.
     pub more: bool,
+    /// The id of Sol's database, made when Sol first started and again when
+    /// it is restored from a backup. Cursors (`next` here and in the inbox)
+    /// belong to one id: when it changes, start again from `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
 }
 
-/// The `409` body when `if_version` didn't match.
+/// The `409` body when `if_version` didn't match (`error` is `conflict`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Conflict {
     pub error: String,
     pub message: String,
     /// The document as it is now; `None` if it doesn't exist.
     pub current: Option<Doc>,
+}
+
+/// The schema version of a stored shape written before it carried one. A
+/// world's stored type keeps its version in a `v` field, so a later shape can
+/// tell old rows from new: `#[serde(default = "orbit::doc::first_shape")] v: u32`.
+pub fn first_shape() -> u32 {
+    1
 }
 
 /// Collection names: lowercase letters, digits, `-` and `_`, at most 64.

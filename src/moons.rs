@@ -11,9 +11,11 @@
 //! - its planet's app, at start-up, holds a lock for as long as it runs and
 //!   starts every moon written down for it with [`BACKGROUND`] ([`start`]);
 //! - the moon, started that way, opens no window. It syncs and acts on what
-//!   Sol delivers like any copy, and leaves once its planet has been gone a
-//!   while ([`planet_gone`]). Opened from the app menu it shows its window,
-//!   and while its planet runs, closing the window leaves it working.
+//!   Sol delivers like any copy, and leaves a few seconds after its planet
+//!   does ([`planet_gone`]: it waits on the planet's lock, so it hears at
+//!   once, even when the planet crashed). Opened from the app menu it shows
+//!   its window, and while its planet runs, closing the window leaves it
+//!   working.
 //!
 //! The person can keep a moon from running with its planet on a computer
 //! ([`set_enabled`]); it's on until then.
@@ -22,7 +24,7 @@ use std::{
     fs::{File, OpenOptions, TryLockError},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::Context;
@@ -33,11 +35,10 @@ use crate::install::{self, App, Here};
 /// The argument a planet starts its moons with: no window, just the work.
 pub const BACKGROUND: &str = "--background";
 
-/// How often a moon in the background looks whether its planet still runs.
-const LOOK_EVERY: Duration = Duration::from_secs(20);
-/// How long its planet must be gone before it leaves: long enough for what
-/// the planet did last to reach the moon through Sol.
-const LINGER: Duration = Duration::from_secs(90);
+/// How long a moon stays after its planet left, in case it is only starting
+/// again (after an update); what the planet did last waits for the moon in
+/// Sol's inbox either way.
+const GRACE: Duration = Duration::from_secs(5);
 
 /// What a moon writes down for its planet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,15 +82,29 @@ pub fn running(world: &str) -> bool {
     base().is_some_and(|base| is_running(&base, world))
 }
 
-/// For a moon in the background: resolves once its planet has stopped
-/// running and stayed away for a while.
+/// For a moon in the background: resolves a few seconds after its planet
+/// stopped running (quit, was stopped, or crashed), unless it came back.
 pub async fn planet_gone(parent: &str) {
-    let mut gone_since: Option<Instant> = None;
+    if let Some(base) = base() {
+        planet_gone_in(&base, parent, GRACE).await;
+    }
+}
+
+async fn planet_gone_in(base: &Path, parent: &str, grace: Duration) {
     loop {
-        tokio::time::sleep(LOOK_EVERY).await;
-        if running(parent) {
-            gone_since = None;
-        } else if gone_since.get_or_insert_with(Instant::now).elapsed() >= LINGER {
+        let lock = lock_path(base, parent);
+        // Blocks while the planet holds its lock, and returns as soon as it
+        // lets go: the system releases it when the planet's process ends.
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(file) = File::open(&lock)
+                && file.lock_shared().is_ok()
+            {
+                let _ = file.unlock();
+            }
+        })
+        .await;
+        tokio::time::sleep(grace).await;
+        if !is_running(base, parent) {
             return;
         }
     }
@@ -156,13 +171,7 @@ pub(crate) fn base() -> Option<PathBuf> {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
     };
-    let data = if cfg!(target_os = "windows") {
-        var("LOCALAPPDATA")
-    } else if cfg!(target_os = "macos") {
-        var("HOME").map(|h| h.join("Library/Application Support"))
-    } else {
-        var("XDG_DATA_HOME").or_else(|| var("HOME").map(|h| h.join(".local/share")))
-    };
+    let data = var("XDG_DATA_HOME").or_else(|| var("HOME").map(|h| h.join(".local/share")));
     data.map(|d| d.join("sol-worlds"))
 }
 
@@ -326,6 +335,39 @@ mod tests {
             std::fs::metadata(&file).unwrap().modified().unwrap(),
             before
         );
+    }
+
+    #[tokio::test]
+    async fn a_moon_hears_its_planet_leave_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_owned();
+        let held = hold(&base, "terra").expect("the lock");
+        let gone = tokio::spawn({
+            let base = base.clone();
+            async move { planet_gone_in(&base, "terra", Duration::from_millis(100)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!gone.is_finished(), "the planet still runs");
+        let left = std::time::Instant::now();
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(2), gone)
+            .await
+            .expect("the moon heard within the grace")
+            .unwrap();
+        assert!(left.elapsed() < Duration::from_secs(1));
+
+        // A planet that starts again within the grace keeps its moon.
+        let held = hold(&base, "terra").expect("the lock");
+        let gone = tokio::spawn({
+            let base = base.clone();
+            async move { planet_gone_in(&base, "terra", Duration::from_millis(400)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(held);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _again = hold(&base, "terra").expect("the lock again");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(!gone.is_finished(), "the planet came back");
     }
 
     #[test]

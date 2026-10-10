@@ -9,7 +9,8 @@ use rusqlite::params;
 
 use super::{
     LONG_POLL, Link, State, Status, Update,
-    cache::meta,
+    cache::{meta, read_meta},
+    kept,
     token::{forget_token, save_token},
 };
 use crate::{
@@ -63,7 +64,8 @@ impl Link {
         }
     }
 
-    /// Unpairs this device: tells Sol, forgets the token and the local copy.
+    /// Unpairs this device: tells Sol, forgets the token and the local copy
+    /// (writes not yet sent are kept aside, see [`Link::kept`]).
     pub async fn forget(&self) -> anyhow::Result<()> {
         self.stop_tasks();
         if let Some(client) = self.client() {
@@ -103,28 +105,46 @@ impl Link {
         self.announce();
     }
 
-    async fn finish(&self, server: &str, paired: Paired) -> anyhow::Result<()> {
+    pub(super) async fn finish(&self, server: &str, paired: Paired) -> anyhow::Result<()> {
         save_token(&self.0.cfg, &paired.device_id, &paired.token).await?;
-        let (server_s, device, user) = (
+        let (server_s, device, user, person) = (
             server.to_owned(),
             paired.device_id.clone(),
             serde_json::to_string(&paired.user)?,
+            paired.user.id.clone(),
         );
-        self.0
+        let replayed = self
+            .0
             .db
-            .call(move |c| -> rusqlite::Result<()> {
+            .call(move |c| -> rusqlite::Result<usize> {
                 let tx = c.transaction()?;
+                // Writes still waiting from a pairing that ended without
+                // `reset` (a token lost from the keyring) are kept too.
+                let before = read_meta(&tx)?;
+                kept::set_aside(
+                    &tx,
+                    before.user.as_ref().map(|u| u.id.as_str()),
+                    before.server.as_deref(),
+                )?;
                 // A new pairing starts from Sol's copy.
-                tx.execute_batch("DELETE FROM docs; DELETE FROM pending; DELETE FROM meta WHERE key NOT LIKE 'pref:%';")?;
+                tx.execute_batch(
+                    "DELETE FROM docs; DELETE FROM meta WHERE key NOT LIKE 'pref:%';",
+                )?;
                 for (k, v) in [("server", server_s), ("device", device), ("user", user)] {
                     tx.execute(
                         "INSERT INTO meta (key, value) VALUES (?1, ?2)",
                         params![k, v],
                     )?;
                 }
-                tx.commit()
+                // The same person again: what they wrote before goes to Sol now.
+                let replayed = kept::replay_earlier(&tx, &person)?;
+                tx.commit()?;
+                Ok(replayed)
             })
             .await??;
+        if replayed > 0 {
+            tracing::info!(replayed, "sending the writes from before pairing again");
+        }
         *self.lock() = State::Paired {
             client: self.sol(server).with_token(paired.token),
             user: paired.user,
@@ -132,22 +152,44 @@ impl Link {
             error: None,
         };
         self.announce();
+        self.announce_kept().await;
+        let _ = self.0.updates.send(Update::Changed(Vec::new()));
         self.spawn_session();
         Ok(())
     }
 
-    /// Back to unpaired: no token, no local copy.
+    /// Back to unpaired: no token, no local copy. Writes still waiting are
+    /// kept aside (see [`super::Kept`]), and go again if this device pairs
+    /// with the same person.
     pub(super) async fn reset(&self, error: Option<String>) -> anyhow::Result<()> {
         let device = self.0.db.call(|c| meta(c, "device")).await??;
         if let Some(device) = device {
             forget_token(&self.0.cfg, &device).await;
         }
-        self.0
+        let kept = self
+            .0
             .db
-            .call(|c| c.execute_batch("DELETE FROM docs; DELETE FROM pending; DELETE FROM meta WHERE key NOT LIKE 'pref:%';"))
+            .call(|c| -> rusqlite::Result<usize> {
+                let tx = c.transaction()?;
+                let before = read_meta(&tx)?;
+                let kept = kept::set_aside(
+                    &tx,
+                    before.user.as_ref().map(|u| u.id.as_str()),
+                    before.server.as_deref(),
+                )?;
+                tx.execute_batch(
+                    "DELETE FROM docs; DELETE FROM meta WHERE key NOT LIKE 'pref:%';",
+                )?;
+                tx.commit()?;
+                Ok(kept)
+            })
             .await??;
+        if kept > 0 {
+            tracing::info!(kept, "unpaired with writes not yet sent; keeping them");
+        }
         *self.lock() = State::Unpaired { error };
         self.announce();
+        self.announce_kept().await;
         let _ = self.0.updates.send(Update::Changed(Vec::new()));
         Ok(())
     }

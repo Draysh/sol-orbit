@@ -21,7 +21,8 @@ pub struct PairRequest {
     pub world: String,
     /// How the device appears in Sol, e.g. `Desktop` or `Lukas's phone`.
     pub device: String,
-    /// `linux`, `windows`, `macos`, `android` or `ios`.
+    /// The system it runs on: `linux` (what the worlds ship for). Sol takes
+    /// any short name and shows the ones it knows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
 }
@@ -52,9 +53,10 @@ pub struct Paired {
     pub user: Person,
 }
 
-/// Answer to a claim that is still waiting for the person.
+/// Answer to a claim that is still waiting for the person (`202`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct Pending {
+    /// Always `pending`.
     pub status: String,
 }
 
@@ -72,6 +74,9 @@ pub struct DeviceMe {
     pub device_id: String,
     pub world: String,
     pub user: Person,
+    /// The id of Sol's database (see [`crate::doc::ChangePage::database`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
 }
 
 /// Something another world asked this one to do, through a connection.
@@ -88,11 +93,15 @@ pub struct Delivery {
     pub created_at: DateTime<Utc>,
 }
 
-/// `GET /api/v1/inbox?after=N`.
+/// `GET /api/v1/inbox?after=N`: at most 100 deliveries after `N`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct InboxPage {
     pub deliveries: Vec<Delivery>,
+    /// Send as `after` next time.
     pub next: i64,
+    /// The id of Sol's database (see [`crate::doc::ChangePage::database`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<String>,
 }
 
 /// `PUT /api/v1/widgets/{id}`: the latest look of one of the world's widgets

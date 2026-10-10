@@ -119,6 +119,26 @@ pub fn load(user: &str) -> Option<String> {
         .find_map(|backend| read(backend, user).ok().flatten())
 }
 
+/// Like [`load`], but tells "nothing stored" (`Ok(None)`) apart from "no
+/// store would answer" (`Err`): a keyring still locked at login, or not
+/// started yet, answers nothing at all, and the token is still in it.
+pub fn lookup(user: &str) -> Result<Option<String>, Unavailable> {
+    let mut reasons = Vec::new();
+    let mut answered = false;
+    for backend in backends() {
+        match read(backend, user) {
+            Ok(Some(secret)) => return Ok(Some(secret)),
+            Ok(None) => answered = true,
+            Err(why) => reasons.push((backend, why)),
+        }
+    }
+    if answered {
+        Ok(None)
+    } else {
+        Err(Unavailable { reasons })
+    }
+}
+
 /// Forgets the saved secret, in whichever store holds it.
 ///
 /// Every store is asked, not just the first that works: a password saved

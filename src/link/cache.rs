@@ -7,7 +7,10 @@ use rusqlite_migration::M;
 
 use crate::{Doc, device::Person};
 
-pub(super) const MIGRATIONS: &[M<'static>] = &[M::up(include_str!("cache.sql"))];
+pub(super) const MIGRATIONS: &[M<'static>] = &[
+    M::up(include_str!("cache.sql")),
+    M::up(include_str!("cache-2.sql")),
+];
 
 pub(super) const COLUMNS: &str = "collection, id, version, updated_at, deleted, data";
 
@@ -72,7 +75,7 @@ pub(super) fn set_meta(c: &Connection, key: &str, value: &str) -> rusqlite::Resu
     Ok(())
 }
 
-pub(super) fn cursor(c: &mut Connection, name: &str) -> rusqlite::Result<i64> {
+pub(super) fn cursor(c: &Connection, name: &str) -> rusqlite::Result<i64> {
     Ok(meta(c, &format!("cursor:{name}"))?
         .and_then(|v| v.parse().ok())
         .unwrap_or(0))
@@ -84,7 +87,7 @@ pub(super) struct Meta {
     pub(super) user: Option<Person>,
 }
 
-pub(super) fn read_meta(c: &mut Connection) -> rusqlite::Result<Meta> {
+pub(super) fn read_meta(c: &Connection) -> rusqlite::Result<Meta> {
     Ok(Meta {
         server: meta(c, "server")?,
         device: meta(c, "device")?,

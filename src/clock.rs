@@ -1,6 +1,8 @@
 //! The person's day: their time zone and the world's `day_starts` setting,
 //! never the machine's clock. Before the day starts it is still the day
 //! before, so a review at two in the morning belongs to the evening before.
+//! Until the person sets `day_starts`, a day begins at [`DEFAULT_DAY_STARTS`]
+//! (04:00), the default every world's manifest gives it.
 //!
 //! ```no_run
 //! # async fn run(link: orbit::link::Link) {
@@ -22,6 +24,14 @@ use crate::link::Link;
 /// The setting that says when a world's day begins, as `HH:MM`.
 pub const DAY_STARTS: &str = "day_starts";
 
+/// When a day begins until the person sets `day_starts`: 04:00, the default
+/// every manifest with the setting writes (each world's manifest test checks
+/// it), so a tick at two in the morning counts for the day before.
+pub const DEFAULT_DAY_STARTS: NaiveTime = match NaiveTime::from_hms_opt(4, 0, 0) {
+    Some(t) => t,
+    None => unreachable!(),
+};
+
 /// Where a day is lived: a time zone, and the time of day it begins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Clock {
@@ -31,9 +41,9 @@ pub struct Clock {
 }
 
 impl Default for Clock {
-    /// UTC, with days that begin at midnight.
+    /// UTC, with days that begin at [`DEFAULT_DAY_STARTS`].
     fn default() -> Self {
-        Self::new(Tz::UTC, NaiveTime::MIN)
+        Self::new(Tz::UTC, DEFAULT_DAY_STARTS)
     }
 }
 
@@ -43,18 +53,28 @@ impl Clock {
     }
 
     /// The person's time zone and the world's `day_starts` setting, as Sol
-    /// last sent them. Days begin at midnight when the world has no such
-    /// setting or it isn't a time.
+    /// last sent them. Days begin at [`DEFAULT_DAY_STARTS`] when the setting
+    /// is unset or isn't a time, and when the settings can't be read (that
+    /// is logged).
     pub async fn of(link: &Link) -> Self {
-        let settings = link.settings().await.unwrap_or_default();
+        let settings = link.settings().await.unwrap_or_else(|e| {
+            tracing::warn!("couldn't read the settings for the day's start: {e:#}");
+            BTreeMap::new()
+        });
         Self::with(link, &settings)
     }
 
     /// The same, with the settings already read.
     pub fn with(link: &Link, settings: &BTreeMap<String, serde_json::Value>) -> Self {
+        Self::from_settings(link.time_zone(), settings)
+    }
+
+    /// A time zone and the `day_starts` in `settings`, or
+    /// [`DEFAULT_DAY_STARTS`] when it is unset or isn't a time.
+    pub fn from_settings(tz: Tz, settings: &BTreeMap<String, serde_json::Value>) -> Self {
         Self::new(
-            link.time_zone(),
-            time_setting(settings, DAY_STARTS).unwrap_or(NaiveTime::MIN),
+            tz,
+            time_setting(settings, DAY_STARTS).unwrap_or(DEFAULT_DAY_STARTS),
         )
     }
 
@@ -160,6 +180,34 @@ mod tests {
     }
 
     #[test]
+    fn an_unset_day_starts_at_four() {
+        let tz: Tz = "Europe/Warsaw".parse().unwrap();
+        let unset = Clock::from_settings(tz, &BTreeMap::new());
+        assert_eq!(unset.day_starts, DEFAULT_DAY_STARTS);
+        assert_eq!(DEFAULT_DAY_STARTS, parse_time("04:00").unwrap());
+        // 02:00 in Warsaw is still the day before; 04:00 is the new day.
+        assert_eq!(
+            unset.day_of(utc("2026-03-01T01:00:00Z")),
+            date("2026-02-28")
+        );
+        assert_eq!(
+            unset.day_of(utc("2026-03-01T03:00:00Z")),
+            date("2026-03-01")
+        );
+        // A setting that isn't a time counts as unset; midnight is honoured.
+        let bad = BTreeMap::from([(DAY_STARTS.to_owned(), json!("soon"))]);
+        assert_eq!(
+            Clock::from_settings(tz, &bad).day_starts,
+            DEFAULT_DAY_STARTS
+        );
+        let midnight = BTreeMap::from([(DAY_STARTS.to_owned(), json!("00:00"))]);
+        assert_eq!(
+            Clock::from_settings(tz, &midnight).day_starts,
+            NaiveTime::MIN
+        );
+    }
+
+    #[test]
     fn days_begin_across_the_clock_changes() {
         let clock = warsaw("04:00");
         assert_eq!(
@@ -202,7 +250,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unpaired_link_lives_in_utc_from_midnight() {
+    async fn an_unpaired_link_lives_in_utc_from_four() {
         let dir = tempfile::tempdir().unwrap();
         let link = Link::open(crate::link::Config {
             world: "terra".into(),

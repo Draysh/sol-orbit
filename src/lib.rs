@@ -2,7 +2,7 @@
 //!
 //! Sol is the one server. It keeps every world's data, the person's settings
 //! and the connections between worlds. Each world is an app of its own (a
-//! desktop app, later a phone app) that pairs with Sol and works with its data
+//! desktop app) that pairs with Sol and works with its data
 //! there, the way a music player works with a Navidrome server.
 //!
 //! This crate holds what both sides share: the shapes on the wire
@@ -50,11 +50,13 @@ pub use event::Envelope;
 pub use widget::WidgetView;
 pub use world::WorldManifest;
 
-/// Version of the protocol described in `docs/protocol.md`. It goes up only
-/// when a change breaks apps or Sols that speak an older one.
+/// Version of the protocol described in `docs/protocol.md`. Protocol 2 is
+/// Sol 1.0's, frozen; the number goes up only when a change breaks apps or
+/// Sols that speak an older one (see "Compatibility" there).
 pub const PROTOCOL: u32 = 2;
 
-/// Header an app sends with every request: the protocol it speaks.
+/// Header an app sends with every request to `/api/v1`: the protocol it
+/// speaks. Sol requires it.
 pub const PROTOCOL_HEADER: &str = "sol-protocol";
 /// Header an app sends with every request: its own version, e.g. `0.2.0`.
 pub const VERSION_HEADER: &str = "sol-app-version";

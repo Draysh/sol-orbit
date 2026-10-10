@@ -6,15 +6,14 @@
 //! GitHub release with its own token and offers the matching file, which the
 //! app then downloads through Sol (`GET /api/v1/update/download/{asset}`).
 //!
-//! Every file is signed on the person's own computer with their update key
-//! (`scripts/sign-releases.sh` in Sol's repository: a minisign signature in
-//! the text form `tauri signer sign` writes) and the app checks the signature
-//! against the public key built into it before installing anything, so
-//! neither Sol nor GitHub has to be trusted with what runs on the device.
+//! Every file is signed on the person's own computer with their update key,
+//! a minisign key, and the app checks the signature against the public key
+//! built into it before installing anything, so neither Sol nor GitHub has
+//! to be trusted with what runs on the device.
 //!
 //! Release files are named `sol-<world>-<version>-<target><suffix>`, e.g.
 //! `sol-terra-0.2.0-linux-x86_64.tar.gz`, with the signature next to each as
-//! `<file>.sig`.
+//! `<file>.sig`. What ships is the Linux `.tar.gz`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -27,47 +26,42 @@ pub enum Kind {
     /// The app's own binary, installed by itself (Linux): it updates itself
     /// from a `.tar.gz`.
     Portable,
-    /// Installed with its setup program (Windows): it updates by running the
-    /// next setup.
-    Setup,
-    /// A `.deb` package; the system's package manager updates it.
-    Deb,
-    /// An `.rpm` package; the system's package manager updates it.
-    Rpm,
+    /// A kind this build doesn't know (an older one, such as `deb`, or a
+    /// newer one); Sol offers no file for it.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Kind {
-    /// How the release file for this kind ends.
-    pub fn suffix(self) -> &'static str {
+    /// How the release file for this kind ends; `None` for [`Kind::Unknown`].
+    pub fn suffix(self) -> Option<&'static str> {
         match self {
-            Self::Portable => ".tar.gz",
-            Self::Setup => "-setup.exe",
-            Self::Deb => ".deb",
-            Self::Rpm => ".rpm",
+            Self::Portable => Some(".tar.gz"),
+            Self::Unknown => None,
         }
     }
 
     /// Whether the app can install the update by itself.
     pub fn installs_itself(self) -> bool {
-        matches!(self, Self::Portable | Self::Setup)
+        self == Self::Portable
     }
 
     pub fn of_file(name: &str) -> Option<Self> {
-        [Self::Setup, Self::Portable, Self::Deb, Self::Rpm]
+        [Self::Portable]
             .into_iter()
-            .find(|k| name.ends_with(k.suffix()))
+            .find(|k| k.suffix().is_some_and(|s| name.ends_with(s)))
     }
 }
 
-/// The platform an app runs on, as release files name it: `linux-x86_64`,
-/// `linux-aarch64`, `windows-x86_64`, …
+/// The platform an app runs on, as release files name it: `linux-x86_64`
+/// or `linux-aarch64`.
 pub fn target() -> String {
     format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
-/// The file name a release carries for one world, version, target and kind.
-pub fn file_name(world: &str, version: &str, target: &str, kind: Kind) -> String {
-    format!("sol-{world}-{version}-{target}{}", kind.suffix())
+/// The file name a release carries for one world, version and target.
+pub fn file_name(world: &str, version: &str, target: &str) -> String {
+    format!("sol-{world}-{version}-{target}.tar.gz")
 }
 
 /// `GET /api/v1/update`.
@@ -105,7 +99,8 @@ pub struct Offer {
     pub size: u64,
     /// Path on Sol to download it from, with the device's token.
     pub download: String,
-    /// The file's minisign signature, base64 as `tauri signer sign` writes it.
+    /// The file's minisign signature: the `.minisig` text (two comment
+    /// lines and two base64 lines), itself encoded in base64.
     pub signature: String,
 }
 
@@ -121,17 +116,26 @@ mod tests {
 
     #[test]
     fn names_and_kinds() {
-        let name = file_name("terra", "0.2.0", "linux-x86_64", Kind::Portable);
+        let name = file_name("terra", "0.2.0", "linux-x86_64");
         assert_eq!(name, "sol-terra-0.2.0-linux-x86_64.tar.gz");
         assert_eq!(Kind::of_file(&name), Some(Kind::Portable));
         assert_eq!(
             Kind::of_file("sol-terra-0.2.0-windows-x86_64-setup.exe"),
-            Some(Kind::Setup)
+            None
         );
         assert_eq!(
             Kind::of_file("sol-terra-0.2.0-linux-x86_64.tar.gz.sig"),
             None
         );
+    }
+
+    #[test]
+    fn kinds_this_build_does_not_know() {
+        for old in ["\"deb\"", "\"setup\"", "\"flatpak\""] {
+            assert_eq!(serde_json::from_str::<Kind>(old).unwrap(), Kind::Unknown);
+        }
+        assert_eq!(Kind::Unknown.suffix(), None);
+        assert!(!Kind::Unknown.installs_itself());
     }
 
     #[test]

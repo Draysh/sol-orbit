@@ -15,9 +15,17 @@ with Sol, the way a music player pairs with a Navidrome server.
   on. It pairs with a code approved in Sol, keeps the token in the system
   keyring (or KWallet), keeps a local copy of the world's data that works
   offline, sends local changes in order, takes in other devices' changes,
-  claims and runs what other worlds ask of it, and pushes widgets.
+  claims and runs what other worlds ask of it, and pushes widgets. Nothing
+  written is lost: a document changed on another device first comes back
+  as a conflict with both copies kept (`if_version`), a write Sol turns
+  down is kept with Sol's reason, and writes waiting when the device is
+  unpaired are kept and sent once it pairs again as the same person
+  (`Link::kept`). A local copy that won't open says why (`LocalCopyError`).
+- **`orbit::telemetry`**: logs to stdout, and for an app to a file of its own
+  that starts again at 2 MB, with panics logged.
 - **`orbit::clock::Clock`** (feature `app`): the person's day, in their time
-  zone and starting at the world's `day_starts` setting.
+  zone and starting at the world's `day_starts` setting (04:00 until it is set,
+  `DEFAULT_DAY_STARTS`).
 - **`orbit::client::Sol`** (feature `client`): the protocol itself, request by
   request.
 - **`orbit::keystore`** (feature `keystore`): secrets in the system keyring,
@@ -25,12 +33,17 @@ with Sol, the way a music player pairs with a Navidrome server.
 - **`orbit::db::Actor`**: SQLite on its own thread, for Sol's databases and an
   app's local copy alike.
 - **`orbit::install`** and **`orbit::updates`** (feature `app`): the app
-  installing itself for the person and updating through Sol, with every file's
-  signature checked against the key built into it.
+  installing itself for the person and updating through Sol. Every file's
+  signature is checked against the keys built into it (one or several), its
+  trusted comment must name the file, and the version only goes up; the new
+  binary is started (`--version`, its Qt too) before it goes in, the old one
+  stays as `<bin>.old`, and a new version that never comes up is rolled back
+  on the next start.
 - **`orbit::moons`** (feature `app`): moons that run by themselves. An
   installed moon writes down where it is; its planet's app starts it with
   `--background` (no window) whenever the planet starts and holds a lock the
-  moon watches, and the moon leaves a little after the planet does. Nobody
+  moon waits on, and the moon leaves about five seconds after the planet
+  does (or crashes). Nobody
   has to remember to open Titan, Luna or Triton for their work to happen.
 - **`orbit::doors`** (feature `app`): which Sol apps are installed on the
   computer, and opening one from another.

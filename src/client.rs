@@ -21,6 +21,11 @@
 //! let page = sol.changes(0, Duration::ZERO).await?;
 //! # Ok(()) }
 //! ```
+//!
+//! Every request carries `Sol-Protocol` ([`crate::PROTOCOL`]) and, given
+//! [`Sol::with_version`], `Sol-App-Version`. A `429` comes back as
+//! [`Error::Api`] with Sol's `Retry-After`; `link::Link` waits that
+//! long before it tries again.
 
 use std::{collections::BTreeMap, time::Duration};
 
@@ -42,6 +47,9 @@ pub enum Error {
         status: u16,
         code: String,
         message: String,
+        /// How long Sol asks the app to wait before trying again (its
+        /// `Retry-After`, sent with a `429`).
+        retry_after: Option<Duration>,
     },
     /// `if_version` didn't match; here is the document as it is now.
     #[error("the document changed in the meantime")]
@@ -308,6 +316,7 @@ async fn check(res: Response) -> Result<Response> {
             current: body.and_then(|b| b.current).map(Box::new),
         });
     }
+    let retry_after = retry_after(res.headers());
     let body: Option<ErrorBody> = res.json().await.ok();
     let (code, message) = body.map_or_else(
         || ("http".to_owned(), status.to_string()),
@@ -317,5 +326,28 @@ async fn check(res: Response) -> Result<Response> {
         status: status.as_u16(),
         code,
         message,
+        retry_after,
     })
+}
+
+/// `Retry-After` in seconds (the form Sol sends), at most an hour.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let secs: u64 = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(secs.min(60 * 60)))
+}
+
+impl Error {
+    /// How long to wait before asking again, when Sol said (a `429`).
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::Api { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
 }

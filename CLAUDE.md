@@ -25,14 +25,14 @@ Without features (the shapes, shared with Sol):
 
 - `lib.rs`: the module list, `PROTOCOL` and the two request headers.
 - `world.rs`: `WorldManifest` (`sol-world.json`) and its checks.
-- `doc.rs`: documents, change pages, name rules, `value_of` (JSON that keeps `f32`s as written).
+- `doc.rs`: documents, change pages, name rules, `value_of` (JSON that keeps `f32`s as written), `first_shape` (the `v` of rows from before a stored type had one).
 - `event.rs`: `Emit` (what an app posts) and `Envelope` (what Sol stores).
 - `device.rs`: pairing, `Person`, inbox `Delivery`s, widget pushes.
 - `widget.rs`: `WidgetView`, a widget on Sol's dashboard.
-- `update.rs`: the update check, release file names and install kinds.
+- `update.rs`: the update check, release file names and install kinds (`portable` alone).
 - `error.rs`: `ErrorBody`, every error's JSON.
 - `db.rs`: `Actor`, SQLite on its own thread (Sol's databases and an app's copy).
-- `telemetry.rs`: logging set-up.
+- `telemetry.rs`: logging set-up; `init_app` adds a log file that starts again at 2 MB, and logs panics.
 
 `client` (HTTP) and `keystore` (keyring):
 
@@ -42,37 +42,60 @@ Without features (the shapes, shared with Sol):
 `app` (both plus everything a world app runs on):
 
 - `link/mod.rs`: `Link`, its `Config`, `Status`, `Update`, `Handler`; events, widgets, the time zone.
-- `link/docs.rs`: documents in the local copy (`list`, `get`, `put`, `delete` and the typed `*_as`).
+- `link/mod.rs` also: `LocalCopyError` (a copy that won't open: newer or damaged) and `set_aside`;
+  waiting for a locked keyring at login.
+- `link/docs.rs`: documents in the local copy (`list`, `get`, `put` with the version it was made
+  on, `overwrite` without, `delete`, the typed `*_as`, and `list_counted`: rows with how many of
+  another shape were left out, logged once when that count changes).
+- `link/kept.rs`: writes kept aside (`held` table): conflicts (a `409`, both copies), writes Sol
+  rejected (`400`/`413`), writes from before an unpairing (sent again for the same person); `Kept`,
+  `KeptWrite`, `keep_mine`, `drop_kept`, `export_kept`.
 - `link/settings.rs`: the world's settings and `on_settings` / `Configure`.
-- `link/pairing.rs`: connect, approval, unpairing, starting over.
-- `link/sync.rs`: sending local writes, taking in changes, online/offline.
+- `link/pairing.rs`: connect, approval, unpairing, starting over (waiting writes are set aside,
+  never deleted, and replayed when the same person pairs again).
+- `link/sync.rs`: sending local writes (`if_version`, conflicts, rejected writes), taking in
+  changes, online/offline, waiting out a `429`, reading everything again when Sol's database id
+  changes (a restore), and starting the sync and inbox loops again after a panic.
 - `link/inbox.rs`: claiming deliveries and handing them to the `Handler`.
-- `link/cache.rs` + `cache.sql`: the local SQLite tables and their helpers.
+- `link/cache.rs` + `cache.sql`, `cache-2.sql`: the local SQLite tables (opened with
+  `db::open_with_backup`, copies in `backups/`) and their helpers.
 - `link/token.rs`: the token in the keyring or a private file.
-- `clock.rs`: `Clock`, the person's day (time zone and `day_starts`).
-- `install.rs`, `updates.rs`: the app installing and updating itself.
-- `moons.rs`: moons started by their planet; `doors.rs`: opening other worlds' apps.
+- `clock.rs`: `Clock`, the person's day (time zone and `day_starts`; unset, it is `DEFAULT_DAY_STARTS`, 04:00, as every manifest says).
+- `install.rs`, `updates.rs`: the app installing and updating itself: `verify_offer` (keys, the
+  trusted comment's file, versions only up), a test start (`--version`, Qt major.minor), the switch
+  keeping `<bin>.old` (fsynced), the trial (`.<bin>.trial`) and rollback (`.<bin>.rolled-back`).
+- `moons.rs`: moons started by their planet, leaving 5 s after it (they block on its lock);
+  `doors.rs`: opening other worlds' apps.
 
 ## Tests
 
-Inline `mod tests` in each file, except `link/tests.rs` (offline `Link`
-tests). `tests/fixtures/` holds a signed file and its key for `updates.rs`.
+Inline `mod tests` in each file, except `link/tests.rs` (`Link` offline,
+and against stand-in Sols that answer `429`, `401`, `409`, `413`: every
+rule about keeping writes has a test there). `tests/fixtures/` holds two
+signed files and their keys for `updates.rs` (`update.txt`, and a release
+`.tar.gz` whose trusted comment names it, from Sol's tests). Sol's
+`nothing_written_is_lost` drives a conflict and a re-pairing end to end.
 The online paths are tested from Sol's side (above).
 
 ## Shapes that must stay stable
 
-Keep them backwards compatible within a minor version (new fields optional,
-`#[serde(default)]`):
+Protocol 2 is frozen for Sol 1.0: `docs/protocol.md`'s "Compatibility"
+section says what may change. In short, new fields are optional
+(`#[serde(default)]`), and every enum read from the wire ends in a
+`#[serde(other)] Unknown` variant, so a new value is not breaking:
 
 - On the wire: everything in `world`, `doc`, `event`, `device`, `widget`,
-  `update` and `error`, plus release file names (`sol-<world>-<version>-<target><suffix>`
-  and `<file>.sig`).
+  `update` and `error`, plus release file names (`sol-<world>-<version>-<target>.tar.gz`
+  and `<file>.sig`, a minisign signature).
 - On disk, in the folder every Sol app on the computer shares
   (`sol-worlds` in the data folder): `moons/<planet>/<moon>.json`
   (`{ path, on }`), `apps/<world>.json` (`{ path }`) and the
   `running/<world>.lock` files. Other apps' builds read them.
-- An app's local copy (`<world>.db`): `cache.sql` is a migration; add a new
-  one rather than editing it. `pref:` keys in `meta` survive pairing again.
+- An app's local copy (`<world>.db`): `cache.sql` and `cache-2.sql` are
+  migrations; add a new one rather than editing them. `pref:` keys in
+  `meta` survive pairing again; `held` rows survive unpairing.
+- Beside an installed binary: `<bin>.old`, `.<bin>.trial` and
+  `.<bin>.rolled-back` (JSON, `install::Trial` / `RolledBack`).
 
 ## Rules
 

@@ -28,16 +28,35 @@ pub(super) async fn save_token(cfg: &Config, device: &str, token: &str) -> anyho
     write_private(&token_file(cfg, device), token)
 }
 
-pub(super) async fn load_token(cfg: &Config, device: &str) -> Option<String> {
+/// What looking for the token found.
+pub(super) enum Token {
+    Found(String),
+    /// Nowhere: the keyring answered and has none, and there's no file.
+    None,
+    /// The keyring didn't answer (locked, or not started yet) and there's
+    /// no file: the token may well be in it.
+    Locked,
+}
+
+pub(super) async fn load_token(cfg: &Config, device: &str) -> Token {
+    let mut locked = false;
     if cfg.tokens == Tokens::Keyring {
         let key = token_key(cfg, device);
-        if let Ok(Some(token)) = tokio::task::spawn_blocking(move || keystore::load(&key)).await {
-            return Some(token);
+        match tokio::task::spawn_blocking(move || keystore::lookup(&key)).await {
+            Ok(Ok(Some(token))) => return Token::Found(token),
+            Ok(Ok(None)) => {}
+            Ok(Err(why)) => {
+                tracing::info!(%why, "the keyring isn't answering yet");
+                locked = true;
+            }
+            Err(_) => locked = true,
         }
     }
-    std::fs::read_to_string(token_file(cfg, device))
-        .ok()
-        .map(|t| t.trim().to_owned())
+    match std::fs::read_to_string(token_file(cfg, device)) {
+        Ok(token) => Token::Found(token.trim().to_owned()),
+        Err(_) if locked => Token::Locked,
+        Err(_) => Token::None,
+    }
 }
 
 pub(super) async fn forget_token(cfg: &Config, device: &str) {

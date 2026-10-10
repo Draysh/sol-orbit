@@ -40,6 +40,14 @@ pub struct WorldManifest {
     /// worlds are installed: a moon lists the ones to and from its planet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connections: Vec<Suggested>,
+    /// The oldest Sol the world works with, e.g. `1.2.0`; Sol won't install
+    /// it when it is older.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_sol: Option<String>,
+    /// The protocol its app speaks ([`crate::PROTOCOL`] when it was built);
+    /// Sol won't install a world whose app it can't talk to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<u32>,
 }
 
 /// A connection a world suggests: "when this happens there, do that here"
@@ -117,6 +125,9 @@ pub struct Field {
     pub required: bool,
 }
 
+/// What a setting or a parameter holds. A kind this build doesn't know
+/// (from a newer world) reads as [`FieldKind::Unknown`]: Sol shows such a
+/// setting with a note and doesn't take values for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum FieldKind {
@@ -129,6 +140,9 @@ pub enum FieldKind {
     Toggle,
     /// `HH:MM`, in the person's time zone.
     Time,
+    /// A kind from a newer protocol.
+    #[serde(other)]
+    Unknown,
 }
 
 impl FieldKind {
@@ -148,6 +162,9 @@ impl FieldKind {
             (Self::Time, _) => Err("use a time like 07:30".into()),
             (Self::Number, _) => Err("use a number".into()),
             (Self::Toggle, _) => Err("use on or off".into()),
+            (Self::Unknown, _) => Err(
+                "this Sol doesn't know this kind of setting yet; update Sol to change it".into(),
+            ),
             _ => Err("use some text (at most 4000 characters)".into()),
         }
     }
@@ -211,6 +228,7 @@ impl WorldManifest {
                 out.push(format!("setting {:?} appears twice", s.key));
             }
             if let Some(default) = &s.default
+                && s.kind != FieldKind::Unknown
                 && let Err(why) = s.kind.check(default)
             {
                 out.push(format!("default of setting {:?}: {why}", s.key));
@@ -224,6 +242,11 @@ impl WorldManifest {
                 ));
             }
         }
+        if let Some(min) = &self.min_sol
+            && semver::Version::parse(min.trim_start_matches('v')).is_err()
+        {
+            out.push(format!("min_sol {min:?} should be a version like 1.0.0"));
+        }
         let mut actions = std::collections::HashSet::new();
         for a in &self.actions {
             if !actions.insert(&a.id) {
@@ -231,6 +254,32 @@ impl WorldManifest {
             }
         }
         out
+    }
+
+    /// Why a Sol of `version`, speaking protocols `min_protocol` to
+    /// `protocol`, can't take this world, in a sentence for people; `None`
+    /// when it can.
+    pub fn unfit_for(&self, version: &str, min_protocol: u32, protocol: u32) -> Option<String> {
+        if let Some(min) = &self.min_sol
+            && crate::update::newer(min, version) == Some(true)
+        {
+            return Some(format!(
+                "{} needs Sol {} or newer, and this Sol is {version}; update Sol first",
+                self.name,
+                min.trim_start_matches('v')
+            ));
+        }
+        match self.protocol {
+            Some(p) if p > protocol => Some(format!(
+                "{}'s app speaks protocol {p}, newer than this Sol's ({protocol}); update Sol first",
+                self.name
+            )),
+            Some(p) if p < min_protocol => Some(format!(
+                "{}'s app speaks protocol {p}, which this Sol no longer speaks (it needs {min_protocol} or newer); the world needs a newer release",
+                self.name
+            )),
+            _ => None,
+        }
     }
 
     pub fn action(&self, id: &str) -> Option<&Action> {
@@ -284,6 +333,41 @@ mod tests {
         assert_eq!(m.problems().len(), 4, "{:?}", m.problems());
         m.settings[0].shared = Some("Navidrome URL".into());
         assert_eq!(m.problems().len(), 5, "{:?}", m.problems());
+    }
+
+    #[test]
+    fn kinds_from_newer_worlds_still_parse() {
+        let mut json = serde_json::to_value(manifest()).unwrap();
+        json["settings"][0]["kind"] = json!("colour");
+        json["settings"][0]["default"] = json!("#ff8800");
+        json["actions"][0]["params"][0]["kind"] = json!("date");
+        json["something_new"] = json!({ "added": "later" });
+        let m: WorldManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(m.settings[0].kind, FieldKind::Unknown);
+        assert_eq!(m.actions[0].params[0].kind, FieldKind::Unknown);
+        assert!(m.problems().is_empty(), "{:?}", m.problems());
+        assert!(FieldKind::Unknown.check(&json!("#ff8800")).is_err());
+    }
+
+    #[test]
+    fn worlds_say_which_sol_they_need() {
+        let mut m = manifest();
+        assert_eq!(m.unfit_for("1.0.0", 2, 2), None);
+        m.min_sol = Some("1.2.0".into());
+        m.protocol = Some(2);
+        assert!(m.unfit_for("1.2.0", 2, 2).is_none());
+        assert!(
+            m.unfit_for("1.1.9", 2, 2)
+                .unwrap()
+                .contains("needs Sol 1.2.0")
+        );
+        m.min_sol = None;
+        m.protocol = Some(3);
+        assert!(m.unfit_for("1.0.0", 2, 2).unwrap().contains("protocol 3"));
+        m.protocol = Some(1);
+        assert!(m.unfit_for("1.0.0", 2, 2).unwrap().contains("no longer"));
+        m.min_sol = Some("soon".into());
+        assert_eq!(m.problems().len(), 1, "{:?}", m.problems());
     }
 
     #[test]

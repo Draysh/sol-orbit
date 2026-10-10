@@ -1,5 +1,10 @@
 //! The world's documents, read from and written to the local copy.
 
+use std::{
+    collections::HashMap,
+    sync::{Mutex, PoisonError},
+};
+
 use rusqlite::params;
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -11,6 +16,19 @@ use crate::{
     Doc,
     doc::{valid_collection, valid_id},
 };
+
+/// How many documents of another shape each typed listing left out last,
+/// by world, collection and type, so a change is logged once.
+static UNREADABLE: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
+
+/// A collection read as `T` by [`Link::list_counted`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Listed<T> {
+    /// The documents that are `T`, by id, each with its id.
+    pub rows: Vec<(String, T)>,
+    /// How many live documents had another shape and were left out.
+    pub unreadable: usize,
+}
 
 impl Link {
     /// Every live document in a collection, from the local copy.
@@ -40,13 +58,15 @@ impl Link {
     }
 
     /// Every live document in a collection as `T`, by id; documents of
-    /// another shape are left out.
+    /// another shape are left out (how many is logged, see
+    /// [`Link::list_counted`]).
     pub async fn list_as<T: DeserializeOwned>(&self, collection: &str) -> anyhow::Result<Vec<T>> {
         Ok(self
-            .list(collection)
+            .list_counted(collection)
             .await?
+            .rows
             .into_iter()
-            .filter_map(|d| serde_json::from_value(d.data).ok())
+            .map(|(_, t)| t)
             .collect())
     }
 
@@ -55,12 +75,50 @@ impl Link {
         &self,
         collection: &str,
     ) -> anyhow::Result<Vec<(String, T)>> {
-        Ok(self
-            .list(collection)
-            .await?
-            .into_iter()
-            .filter_map(|d| Some((d.id, serde_json::from_value(d.data).ok()?)))
-            .collect())
+        Ok(self.list_counted(collection).await?.rows)
+    }
+
+    /// Every live document in a collection as `T`, each with its id, and how
+    /// many of another shape were left out, for a page that says so. A count
+    /// is logged when it changes (not on every read, so an app reading the
+    /// same rows every minute doesn't write a log line every minute).
+    pub async fn list_counted<T: DeserializeOwned>(
+        &self,
+        collection: &str,
+    ) -> anyhow::Result<Listed<T>> {
+        let mut rows = Vec::new();
+        let mut unreadable = 0;
+        let mut first = None;
+        for d in self.list(collection).await? {
+            match serde_json::from_value(d.data) {
+                Ok(t) => rows.push((d.id, t)),
+                Err(e) => {
+                    unreadable += 1;
+                    first.get_or_insert((d.id, e));
+                }
+            }
+        }
+        let key = format!(
+            "{}/{collection}/{}",
+            self.world(),
+            std::any::type_name::<T>()
+        );
+        let before = UNREADABLE
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(HashMap::new)
+            .insert(key, unreadable)
+            .unwrap_or(0);
+        if unreadable != before {
+            match first {
+                Some((id, e)) => tracing::warn!(
+                    "{unreadable} document(s) in {collection} couldn't be read and were left out \
+                     (the first, {id:?}: {e})"
+                ),
+                None => tracing::info!("every document in {collection} can be read again"),
+            }
+        }
+        Ok(Listed { rows, unreadable })
     }
 
     /// One document as `T`; nothing when there is none or it has another shape.
@@ -87,11 +145,36 @@ impl Link {
     }
 
     /// Writes a document here at once and sends it to Sol in the background.
+    /// If another device changed it in Sol meanwhile, Sol's copy stays and
+    /// this one is kept aside as a conflict (see [`Link::kept`]) for the
+    /// person to choose between them.
     pub async fn put(
         &self,
         collection: &str,
         id: &str,
         data: serde_json::Value,
+    ) -> anyhow::Result<Doc> {
+        self.write(collection, id, data, true).await
+    }
+
+    /// Like [`Link::put`], but this write wins over whatever another device
+    /// wrote meanwhile: for state that only matters as it is now (where
+    /// playback stands, the last page open), never for what the person made.
+    pub async fn overwrite(
+        &self,
+        collection: &str,
+        id: &str,
+        data: serde_json::Value,
+    ) -> anyhow::Result<Doc> {
+        self.write(collection, id, data, false).await
+    }
+
+    async fn write(
+        &self,
+        collection: &str,
+        id: &str,
+        data: serde_json::Value,
+        conditional: bool,
     ) -> anyhow::Result<Doc> {
         check_names(collection, id)?;
         anyhow::ensure!(!data.is_null(), "use delete to remove a document");
@@ -101,7 +184,11 @@ impl Link {
             .db
             .call(move |c| -> rusqlite::Result<Doc> {
                 let tx = c.transaction()?;
-                let version = local(&tx, &c2, &i2)?.map_or(0, |d| d.version);
+                let known = local(&tx, &c2, &i2)?;
+                let version = known.as_ref().map_or(0, |d| d.version);
+                // The copy this write was made on: Sol's version of it, 0 when
+                // Sol has none yet, nothing while that's unknown (a restore).
+                let base = (conditional && version >= 0).then_some(version);
                 tx.execute(
                     "INSERT INTO docs (collection, id, version, updated_at, deleted, data)
                      VALUES (?1, ?2, ?3, ?4, 0, ?5)
@@ -110,8 +197,8 @@ impl Link {
                     params![c2, i2, version, now(), data.to_string()],
                 )?;
                 tx.execute(
-                    "INSERT INTO pending (kind, collection, id, body) VALUES ('put', ?1, ?2, ?3)",
-                    params![c2, i2, data.to_string()],
+                    "INSERT INTO pending (kind, collection, id, body, base) VALUES ('put', ?1, ?2, ?3, ?4)",
+                    params![c2, i2, data.to_string(), base],
                 )?;
                 let written = local(&tx, &c2, &i2)?.expect("just written");
                 tx.commit()?;

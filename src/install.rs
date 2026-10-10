@@ -1,13 +1,11 @@
 //! A world's app installing, updating and removing itself.
 //!
-//! On Linux the release's `.tar.gz` holds just the app's binary. Run from
-//! wherever it was unpacked, the app offers to install itself for the
-//! person alone: the binary to `~/.local/bin/sol-<world>`, its icons and an
-//! entry in the app menu, no root needed. Installed that way it can also
-//! replace itself with a newer version ([`crate::updates`]). Copies from a
-//! `.deb` or `.rpm` belong to the package manager and are left to it.
-//!
-//! On Windows the setup program installs the app, and runs again to update.
+//! The release's `.tar.gz` holds just the app's binary. Run from wherever it
+//! was unpacked, the app offers to install itself for the person alone: the
+//! binary to `~/.local/bin/sol-<world>`, its icons and an entry in the app
+//! menu, no root needed. Installed that way it can also replace itself with
+//! a newer version ([`crate::updates`]). A copy somewhere else the system
+//! owns (`/usr`, `/opt`) is left to whoever put it there.
 
 use std::{
     io::Read,
@@ -34,9 +32,14 @@ pub struct App {
     pub wm_class: &'static str,
     /// PNG icons by size in pixels.
     pub icons: &'static [(u32, &'static [u8])],
-    /// The public key release files are signed with (`tauri signer
-    /// generate` writes it); without one the app never installs updates.
+    /// The minisign public key release files are signed with: the key
+    /// file's text (its comment line and its key line), encoded in base64.
+    /// Without one the app never installs updates. Several keys, one per
+    /// line, are all trusted (for moving to a new key).
     pub pubkey: Option<&'static str>,
+    /// The Qt version this app runs on, e.g. `6.10.1`. An update built for
+    /// another Qt (major and minor) isn't installed. `None`: not checked.
+    pub qt: Option<&'static str>,
 }
 
 impl App {
@@ -54,9 +57,11 @@ pub enum Here {
     Dev,
     /// Not installed: run from wherever it was unpacked. It can install itself.
     Loose { path: PathBuf },
-    /// Installed; `kind` says how it updates.
+    /// Installed; `kind` says how it updates (always [`Kind::Portable`]
+    /// today).
     Installed { kind: Kind, path: PathBuf },
-    /// A platform where the app can't manage itself.
+    /// Somewhere the app doesn't manage itself: a folder the system owns, or
+    /// a system other than Linux.
     Unsupported,
 }
 
@@ -79,22 +84,8 @@ pub fn here(app: &App) -> Here {
     let Ok(exe) = current_exe() else {
         return Here::Unsupported;
     };
-    if cfg!(target_os = "windows") {
-        return Here::Installed {
-            kind: Kind::Setup,
-            path: exe,
-        };
-    }
-    if !cfg!(target_os = "linux") {
+    if !cfg!(target_os = "linux") || exe.starts_with("/usr") || exe.starts_with("/opt") {
         return Here::Unsupported;
-    }
-    if exe.starts_with("/usr") || exe.starts_with("/opt") {
-        let kind = if Path::new("/var/lib/dpkg/status").exists() {
-            Kind::Deb
-        } else {
-            Kind::Rpm
-        };
-        return Here::Installed { kind, path: exe };
     }
     match linux::bin(app) {
         Some(bin) if bin == exe => Here::Installed {
@@ -117,11 +108,11 @@ pub fn current_exe() -> std::io::Result<PathBuf> {
     )
 }
 
-/// Installs this copy for the person alone (Linux) and returns where the
+/// Installs this copy for the person alone and returns where the
 /// installed binary is; start that one and quit this one.
 pub fn install(app: &App) -> anyhow::Result<PathBuf> {
     if !cfg!(target_os = "linux") {
-        bail!("on this system, the app's setup program installs it");
+        bail!("the app installs itself on Linux only");
     }
     let bin = linux::bin(app).context("no home folder to install into")?;
     let exe = current_exe()?;
@@ -157,15 +148,14 @@ pub fn uninstall(app: &App) -> anyhow::Result<()> {
             crate::doors::leave(app.world);
             linux::remove(app)
         }
-        Here::Installed { kind, .. } => {
-            bail!("this copy came from a {kind:?} package; remove it the way it was installed")
+        Here::Unsupported => {
+            bail!("this copy belongs to the system; remove it the way it was put there")
         }
         _ => bail!("this copy isn't installed"),
     }
 }
 
-/// Starts `bin` once this process has quit (call, then quit). Linux; on
-/// Windows the setup program starts the app again by itself.
+/// Starts `bin` once this process has quit (call, then quit).
 pub fn relaunch(bin: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -193,18 +183,270 @@ pub fn relaunch(bin: &Path) -> anyhow::Result<()> {
 /// first, then renamed over it, so a failure never leaves half a binary.
 /// A running binary can be replaced this way; it keeps running as it was.
 pub(crate) fn replace(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let staged = stage(path, bytes)?;
+    std::fs::rename(&staged, path).with_context(|| format!("replacing {}", path.display()))?;
+    sync_dir(path);
+    Ok(())
+}
+
+/// Writes `bytes` beside `path` (`.<name>.new`) as an executable, on the
+/// disk for good, and returns where; [`switch`] puts it in place.
+pub(crate) fn stage(path: &Path, bytes: &[u8]) -> anyhow::Result<PathBuf> {
+    use std::io::Write;
     let dir = path.parent().context("no folder to install into")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("app");
     let temp = dir.join(format!(".{name}.new"));
-    std::fs::write(&temp, bytes).with_context(|| format!("writing {}", temp.display()))?;
+    let mut file =
+        std::fs::File::create(&temp).with_context(|| format!("writing {}", temp.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("writing {}", temp.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
     }
-    std::fs::rename(&temp, path).with_context(|| format!("replacing {}", path.display()))?;
+    Ok(temp)
+}
+
+/// The binary before the last update, kept beside it: `<bin>.old`.
+pub fn old_path(bin: &Path) -> PathBuf {
+    let mut name = bin.as_os_str().to_owned();
+    name.push(".old");
+    PathBuf::from(name)
+}
+
+/// Puts a [`stage`]d binary in place of `path`, keeping the one there as
+/// `<path>.old` for a rollback.
+pub(crate) fn switch(path: &Path, staged: &Path) -> anyhow::Result<()> {
+    let old = old_path(path);
+    if path.exists() {
+        let _ = std::fs::remove_file(&old);
+        // The same file under a second name; a copy where that can't be.
+        if std::fs::hard_link(path, &old).is_err() {
+            std::fs::copy(path, &old).with_context(|| format!("keeping {}", old.display()))?;
+        }
+    }
+    std::fs::rename(staged, path).with_context(|| format!("replacing {}", path.display()))?;
+    sync_dir(path);
     Ok(())
+}
+
+/// Makes a rename in `path`'s folder last through a power cut.
+fn sync_dir(path: &Path) {
+    if let Some(dir) = path.parent()
+        && let Ok(dir) = std::fs::File::open(dir)
+    {
+        let _ = dir.sync_all();
+    }
+}
+
+/// Starts `bin --version` and waits up to `timeout` for it to answer; its
+/// output, or why it didn't start (a library missing, a crash, no answer).
+pub(crate) fn try_start(bin: &Path, timeout: std::time::Duration) -> anyhow::Result<String> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(bin)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("starting {}", bin.display()))?;
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let mut out = String::new();
+            let mut err = String::new();
+            if let Some(mut o) = child.stdout.take() {
+                let _ = o.read_to_string(&mut out);
+            }
+            if let Some(mut e) = child.stderr.take() {
+                let _ = e.read_to_string(&mut err);
+            }
+            if !status.success() {
+                let said = err.lines().chain(out.lines()).next().unwrap_or_default();
+                bail!("it stopped at once ({status}): {said}");
+            }
+            return Ok(out);
+        }
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("it didn't answer within {} s", timeout.as_secs());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The Qt version a binary says it was built with in its `--version`
+/// line (`Terra 1.0.0 (Qt 6.10.1)`), as major and minor.
+pub fn qt_of(said: &str) -> Option<(u32, u32)> {
+    let rest = &said[said.find("(Qt ")? + 4..];
+    let version = rest.split(')').next()?;
+    let mut parts = version.split('.').map(|p| p.trim().parse::<u32>().ok());
+    Some((parts.next()??, parts.next()??))
+}
+
+// ---- Trying an update, and rolling it back ------------------------------------
+
+/// An update put in place and not yet seen to start well, written down
+/// beside the binary (`.<bin>.trial`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct Trial {
+    /// The version it replaced (in `<bin>.old`).
+    pub from: String,
+    /// The version put in place.
+    pub to: String,
+    /// How many times the new version started without saying it started well.
+    #[serde(default)]
+    pub starts: u32,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
+/// An update that didn't start, and was taken back (`.<bin>.rolled-back`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct RolledBack {
+    /// The version that didn't start.
+    pub version: String,
+    /// The version running again.
+    pub back_to: String,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
+/// What [`on_start`] found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Start {
+    /// Nothing to do.
+    Normal,
+    /// This version was just put in place: call [`started_well`] once it
+    /// is up (its window has loaded).
+    Trying,
+    /// This version started before and never came up, so the one before
+    /// it is back in place: start the binary again and leave.
+    RolledBack(Trial),
+}
+
+fn beside(bin: &Path, end: &str) -> PathBuf {
+    let name = bin.file_name().and_then(|n| n.to_str()).unwrap_or("app");
+    bin.with_file_name(format!(".{name}.{end}"))
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+}
+
+/// The running binary, when it is a release build that may be on trial.
+fn this_binary() -> Option<PathBuf> {
+    if cfg!(debug_assertions) {
+        return None;
+    }
+    current_exe().ok()
+}
+
+/// Writes down that version `to` replaced this one at `bin`, to be confirmed.
+pub(crate) fn begin_trial(app: &App, bin: &Path, to: &str) -> anyhow::Result<()> {
+    let trial = Trial {
+        from: app.version.to_owned(),
+        to: to.to_owned(),
+        starts: 0,
+        at: chrono::Utc::now(),
+    };
+    std::fs::write(beside(bin, "trial"), serde_json::to_vec_pretty(&trial)?)?;
+    Ok(())
+}
+
+/// For the app, first thing at start-up (before its window): counts this
+/// start of a version just put in place, and rolls it back when it already
+/// started once and never came up.
+pub fn on_start(app: &App) -> Start {
+    this_binary().map_or(Start::Normal, |bin| on_start_at(&bin, app))
+}
+
+fn on_start_at(bin: &Path, app: &App) -> Start {
+    let file = beside(bin, "trial");
+    let Some(mut trial) = read_json::<Trial>(&file) else {
+        return Start::Normal;
+    };
+    if trial.to != app.version {
+        return Start::Normal;
+    }
+    if trial.starts == 0 {
+        trial.starts = 1;
+        let _ = std::fs::write(&file, serde_json::to_vec_pretty(&trial).unwrap_or_default());
+        return Start::Trying;
+    }
+    match roll_back_at(bin, &trial) {
+        Ok(()) => Start::RolledBack(trial),
+        Err(err) => {
+            tracing::error!(error = ?err, "the update didn't start, and couldn't be rolled back");
+            let _ = std::fs::remove_file(&file);
+            Start::Normal
+        }
+    }
+}
+
+/// For the app, once it has come up after an update: the update stays.
+pub fn started_well(app: &App) {
+    if let Some(bin) = this_binary() {
+        started_well_at(&bin, app);
+    }
+}
+
+fn started_well_at(bin: &Path, app: &App) {
+    let file = beside(bin, "trial");
+    if read_json::<Trial>(&file).is_some_and(|t| t.to == app.version) {
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_file(beside(bin, "rolled-back"));
+        tracing::info!(version = app.version, "the update started well");
+    }
+}
+
+/// For the app whose window failed to load right after an update: puts the
+/// version before it back at once (start the binary again, then leave).
+/// `None` when this isn't a version on trial.
+pub fn roll_back(app: &App) -> Option<Trial> {
+    let bin = this_binary()?;
+    let trial: Trial = read_json(&beside(&bin, "trial"))?;
+    if trial.to != app.version {
+        return None;
+    }
+    match roll_back_at(&bin, &trial) {
+        Ok(()) => Some(trial),
+        Err(err) => {
+            tracing::error!(error = ?err, "couldn't roll the update back");
+            None
+        }
+    }
+}
+
+fn roll_back_at(bin: &Path, trial: &Trial) -> anyhow::Result<()> {
+    let old = old_path(bin);
+    anyhow::ensure!(old.is_file(), "{} isn't there", old.display());
+    std::fs::rename(&old, bin).with_context(|| format!("putting {} back", old.display()))?;
+    sync_dir(bin);
+    let _ = std::fs::remove_file(beside(bin, "trial"));
+    let note = RolledBack {
+        version: trial.to.clone(),
+        back_to: trial.from.clone(),
+        at: chrono::Utc::now(),
+    };
+    std::fs::write(
+        beside(bin, "rolled-back"),
+        serde_json::to_vec_pretty(&note)?,
+    )?;
+    tracing::warn!(version = %trial.to, back_to = %trial.from, "the update didn't start; rolled back");
+    Ok(())
+}
+
+/// The last update that was rolled back here, while the app still runs the
+/// version it went back to.
+pub fn rolled_back(app: &App) -> Option<RolledBack> {
+    rolled_back_at(&this_binary()?, app)
+}
+
+fn rolled_back_at(bin: &Path, app: &App) -> Option<RolledBack> {
+    read_json::<RolledBack>(&beside(bin, "rolled-back")).filter(|n| n.back_to == app.version)
 }
 
 /// The app's binary out of a release's `.tar.gz`.
@@ -334,6 +576,7 @@ mod tests {
         wm_class: "terra",
         icons: &[(128, b"png")],
         pubkey: None,
+        qt: None,
     };
 
     fn tarball(name: &str, body: &[u8]) -> Vec<u8> {
@@ -373,6 +616,78 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o755);
         }
+    }
+
+    #[test]
+    fn an_update_keeps_the_old_binary_and_rolls_back_if_it_never_comes_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin/sol-terra");
+        replace(&bin, b"0.1.0").unwrap();
+        let staged = stage(&bin, b"0.2.0").unwrap();
+        switch(&bin, &staged).unwrap();
+        assert_eq!(std::fs::read(&bin).unwrap(), b"0.2.0");
+        assert_eq!(std::fs::read(old_path(&bin)).unwrap(), b"0.1.0");
+        begin_trial(&APP, &bin, "0.2.0").unwrap();
+
+        // The old version, still running, leaves it alone.
+        assert_eq!(on_start_at(&bin, &APP), Start::Normal);
+        let new = App {
+            version: "0.2.0",
+            ..APP
+        };
+        // The new one's first start is counted; it never says it came up.
+        assert_eq!(on_start_at(&bin, &new), Start::Trying);
+        // So the next start puts 0.1.0 back.
+        assert!(matches!(on_start_at(&bin, &new), Start::RolledBack(t) if t.from == "0.1.0"));
+        assert_eq!(std::fs::read(&bin).unwrap(), b"0.1.0");
+        assert!(!old_path(&bin).exists());
+        let note = rolled_back_at(&bin, &APP).expect("a note");
+        assert_eq!(
+            (note.version.as_str(), note.back_to.as_str()),
+            ("0.2.0", "0.1.0")
+        );
+        // And it is quiet from then on.
+        assert_eq!(on_start_at(&bin, &APP), Start::Normal);
+    }
+
+    #[test]
+    fn an_update_that_comes_up_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin/sol-terra");
+        replace(&bin, b"0.1.0").unwrap();
+        switch(&bin, &stage(&bin, b"0.2.0").unwrap()).unwrap();
+        begin_trial(&APP, &bin, "0.2.0").unwrap();
+        let new = App {
+            version: "0.2.0",
+            ..APP
+        };
+        assert_eq!(on_start_at(&bin, &new), Start::Trying);
+        started_well_at(&bin, &new);
+        assert_eq!(on_start_at(&bin, &new), Start::Normal);
+        assert_eq!(on_start_at(&bin, &new), Start::Normal);
+        assert_eq!(std::fs::read(&bin).unwrap(), b"0.2.0");
+        assert!(rolled_back_at(&bin, &new).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_binary_is_tried_before_it_goes_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("sol-terra");
+        let t = std::time::Duration::from_secs(5);
+        let good = stage(&bin, b"#!/bin/sh\necho 'Terra 0.2.0 (Qt 6.10.1)'\n").unwrap();
+        let said = try_start(&good, t).unwrap();
+        assert_eq!(qt_of(&said), Some((6, 10)));
+        let broken = stage(
+            &bin,
+            b"#!/bin/sh\necho 'libQt6Core.so.6: version Qt_6.11 not found' >&2\nexit 127\n",
+        )
+        .unwrap();
+        let err = try_start(&broken, t).unwrap_err().to_string();
+        assert!(err.contains("Qt_6.11"), "{err}");
+        let stuck = stage(&bin, b"#!/bin/sh\nsleep 30\n").unwrap();
+        assert!(try_start(&stuck, std::time::Duration::from_millis(300)).is_err());
+        assert_eq!(qt_of("Terra 0.1.0"), None);
     }
 
     #[test]

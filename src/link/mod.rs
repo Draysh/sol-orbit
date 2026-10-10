@@ -30,6 +30,7 @@
 mod cache;
 mod docs;
 mod inbox;
+mod kept;
 mod pairing;
 mod settings;
 mod sync;
@@ -54,10 +55,12 @@ use tokio::{
     task::JoinHandle,
 };
 
+pub use docs::Listed;
+pub use kept::{Kept, KeptWrite, Why};
 pub use settings::Configure;
 
 use cache::{MIGRATIONS, meta, read_meta, set_meta};
-use token::load_token;
+use token::{Token, load_token};
 
 use crate::{
     Actor, WidgetView,
@@ -70,6 +73,99 @@ use crate::{
 const LONG_POLL: Duration = Duration::from_secs(25);
 const SETTINGS_EVERY: Duration = Duration::from_secs(10 * 60);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// What the status says while the keyring holding the token is still locked.
+const KEYRING_LOCKED: &str = "waiting for the keyring to unlock";
+
+/// The local copy didn't open: the app asks the person whether to start
+/// again from Sol's copy ([`set_aside`]), or to quit and leave it as it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalCopyError {
+    pub problem: LocalCopyProblem,
+    /// The copy: `<dir>/<world>.db`.
+    pub path: PathBuf,
+    /// What SQLite said, for the log and a "details" line.
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LocalCopyProblem {
+    /// Written by a newer version of the app (one that ran here before).
+    Newer,
+    /// Not a database any more, or damaged inside.
+    Damaged,
+}
+
+impl std::fmt::Display for LocalCopyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.problem {
+            LocalCopyProblem::Newer => write!(
+                f,
+                "{} was written by a newer version of the app",
+                self.path.display()
+            ),
+            LocalCopyProblem::Damaged => {
+                write!(f, "{} is damaged ({})", self.path.display(), self.detail)
+            }
+        }
+    }
+}
+
+impl std::error::Error for LocalCopyError {}
+
+impl LocalCopyError {
+    /// The problem behind a failed open, when it is one of the two.
+    fn of(err: &anyhow::Error, path: &std::path::Path) -> Option<Self> {
+        use rusqlite::ErrorCode;
+        use rusqlite_migration::{Error as M, MigrationDefinitionError};
+        let damaged = |e: &rusqlite::Error| {
+            matches!(
+                e.sqlite_error_code(),
+                Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt)
+            )
+        };
+        let problem = err.chain().find_map(|cause| {
+            if let Some(m) = cause.downcast_ref::<M>() {
+                return match m {
+                    M::MigrationDefinition(MigrationDefinitionError::DatabaseTooFarAhead) => {
+                        Some(LocalCopyProblem::Newer)
+                    }
+                    M::RusqliteError { err, .. } if damaged(err) => Some(LocalCopyProblem::Damaged),
+                    _ => None,
+                };
+            }
+            cause
+                .downcast_ref::<rusqlite::Error>()
+                .filter(|e| damaged(e))
+                .map(|_| LocalCopyProblem::Damaged)
+        })?;
+        Some(Self {
+            problem,
+            path: path.to_owned(),
+            detail: format!("{err:#}"),
+        })
+    }
+}
+
+/// Moves a local copy that won't open out of the way (with its log files),
+/// so the app starts again from Sol's copy; returns where it went
+/// (`<world>.db.set-aside-<time>` beside it). Nothing is deleted.
+pub fn set_aside(dir: &std::path::Path, world: &str) -> anyhow::Result<PathBuf> {
+    let stamp = Utc::now().format("%Y%m%d-%H%M%S");
+    let db = dir.join(format!("{world}.db"));
+    let to = dir.join(format!("{world}.db.set-aside-{stamp}"));
+    std::fs::rename(&db, &to)?;
+    for end in ["-wal", "-shm"] {
+        let from = dir.join(format!("{world}.db{end}"));
+        if from.exists() {
+            std::fs::rename(
+                &from,
+                dir.join(format!("{world}.db.set-aside-{stamp}{end}")),
+            )?;
+        }
+    }
+    Ok(to)
+}
 
 /// How a [`Link`] is set up.
 pub struct Config {
@@ -79,7 +175,7 @@ pub struct Config {
     pub dir: PathBuf,
     /// How the device appears in Sol, e.g. the computer's name.
     pub device: String,
-    /// `linux`, `windows`, `macos`, `android` or `ios`.
+    /// The system it runs on, `linux`, for Sol's device list.
     pub platform: Option<String>,
     /// The app's own version, e.g. `0.2.0`; Sol shows it under Devices.
     pub version: String,
@@ -129,6 +225,9 @@ pub enum Update {
     Settings,
     /// News about the app's own updates (see [`crate::updates`]).
     App(crate::updates::Status),
+    /// Writes kept aside instead of sent changed: a conflict, a write Sol
+    /// turned down, writes from before the device was unpaired.
+    Kept(Kept),
 }
 
 pub type Boxed<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -192,25 +291,43 @@ struct Inner {
 pub struct Link(Arc<Inner>);
 
 impl Link {
-    /// Opens the local copy and picks up an earlier pairing.
+    /// Opens the local copy and picks up an earlier pairing. Before a
+    /// migration changes the copy it is backed up into `backups/` beside it.
+    /// A copy that can't be opened (written by a newer version of the app,
+    /// or damaged) fails with a [`LocalCopyError`], for the app to ask the
+    /// person what to do ([`set_aside`] starts again from Sol's copy).
     pub async fn open(cfg: Config) -> anyhow::Result<Self> {
         let path = cfg.dir.join(format!("{}.db", cfg.world));
+        let backups = cfg.dir.join("backups");
+        let at = path.clone();
         let db = Actor::spawn(&cfg.world, move || {
-            crate::db::open(&path, &Migrations::from_slice(MIGRATIONS))
+            crate::db::open_with_backup(&at, &Migrations::from_slice(MIGRATIONS), &backups)
+        })
+        .map_err(|err| match LocalCopyError::of(&err, &path) {
+            Some(problem) => anyhow::Error::new(problem),
+            None => err,
         })?;
-        let meta = db.call(read_meta).await??;
+        let meta = db.call(|c| read_meta(c)).await??;
         let token = match (&meta.server, &meta.device) {
             (Some(_), Some(device)) => load_token(&cfg, device).await,
-            _ => None,
+            _ => Token::None,
         };
         let state = match (meta.server, meta.user, token) {
-            (Some(server), Some(user), Some(token)) => State::Paired {
+            (Some(server), Some(user), Token::Found(token)) => State::Paired {
                 client: Sol::new(server)
                     .with_version(&cfg.version)
                     .with_token(token),
                 user,
                 online: false,
                 error: None,
+            },
+            // Paired, but the keyring isn't open yet (it unlocks with the
+            // session, after an app that starts at login): offline until it is.
+            (Some(server), Some(user), Token::Locked) => State::Paired {
+                client: Sol::new(server).with_version(&cfg.version),
+                user,
+                online: false,
+                error: Some(KEYRING_LOCKED.into()),
             },
             _ => State::Unpaired { error: None },
         };
@@ -229,8 +346,53 @@ impl Link {
     /// once, from within the async runtime.
     pub fn start(&self, handler: Arc<dyn Handler>) {
         let _ = self.0.handler.set(handler);
-        if matches!(*self.lock(), State::Paired { .. }) {
-            self.spawn_session();
+        let locked = match &*self.lock() {
+            State::Paired { error, .. } => Some(error.as_deref() == Some(KEYRING_LOCKED)),
+            _ => None,
+        };
+        match locked {
+            Some(false) => self.spawn_session(),
+            Some(true) => {
+                let link = self.clone();
+                let task = tokio::spawn(async move { link.wait_for_keyring().await });
+                self.0.tasks.lock().expect("tasks lock").push(task);
+            }
+            None => {}
+        }
+    }
+
+    /// Asks the keyring for the token again until it opens, then syncs.
+    async fn wait_for_keyring(&self) {
+        let Ok(Ok(Some(device))) = self.0.db.call(|c| meta(c, "device")).await else {
+            return;
+        };
+        let mut wait = Duration::from_secs(2);
+        loop {
+            tokio::time::sleep(wait).await;
+            match load_token(&self.0.cfg, &device).await {
+                Token::Found(token) => {
+                    if let State::Paired { client, error, .. } = &mut *self.lock() {
+                        *client = client.clone().with_token(token);
+                        *error = None;
+                    }
+                    tracing::info!("the keyring opened; syncing");
+                    self.announce();
+                    // From a task of its own: this one is among those it stops.
+                    let link = self.clone();
+                    tokio::spawn(async move { link.spawn_session() });
+                    return;
+                }
+                // The keyring answered and has no token: the person pairs
+                // again (what waits to be sent is kept for that).
+                Token::None => {
+                    *self.lock() = State::Unpaired {
+                        error: Some("the keyring had no token for Sol; connect again".into()),
+                    };
+                    self.announce();
+                    return;
+                }
+                Token::Locked => wait = (wait * 2).min(MAX_BACKOFF),
+            }
         }
     }
 
