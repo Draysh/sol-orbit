@@ -64,6 +64,13 @@ pub fn valid_collection(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
+/// A value as JSON for a document or an event's data, through JSON text: an
+/// `f32` is kept as written (7.3), where `serde_json::to_value` widens it
+/// (7.300000190734863) and Sol would store and show the noise.
+pub fn value_of<T: Serialize + ?Sized>(value: &T) -> serde_json::Result<serde_json::Value> {
+    serde_json::from_str(&serde_json::to_string(value)?)
+}
+
 /// Document ids: letters, digits, `-` and `_`, at most 128 (a UUID fits).
 pub fn valid_id(id: &str) -> bool {
     (1..=128).contains(&id.len())
@@ -82,5 +89,17 @@ mod tests {
         assert!(!valid_collection("Habits") && !valid_collection("") && !valid_collection("1x"));
         assert!(valid_id("0192f1c4-7a1b-7c3d-9e0f-123456789abc"));
         assert!(!valid_id("a/b") && !valid_id(""));
+    }
+
+    #[test]
+    fn values_keep_floats_as_written() {
+        #[derive(Serialize)]
+        struct Rated {
+            rating: f32,
+        }
+        assert_eq!(
+            value_of(&Rated { rating: 7.3 }).unwrap(),
+            serde_json::json!({ "rating": 7.3 })
+        );
     }
 }

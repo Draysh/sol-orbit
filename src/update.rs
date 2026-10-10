@@ -6,10 +6,11 @@
 //! GitHub release with its own token and offers the matching file, which the
 //! app then downloads through Sol (`GET /api/v1/update/download/{asset}`).
 //!
-//! Every file is signed in the release workflow (minisign, as `tauri signer
-//! sign` makes it) and the app checks the signature against the public key
-//! built into it before installing anything, so neither Sol nor GitHub has
-//! to be trusted with what runs on the device.
+//! Every file is signed on the person's own computer with their update key
+//! (`scripts/sign-releases.sh` in Sol's repository: a minisign signature in
+//! the text form `tauri signer sign` writes) and the app checks the signature
+//! against the public key built into it before installing anything, so
+//! neither Sol nor GitHub has to be trusted with what runs on the device.
 //!
 //! Release files are named `sol-<world>-<version>-<target><suffix>`, e.g.
 //! `sol-terra-0.2.0-linux-x86_64.tar.gz`, with the signature next to each as

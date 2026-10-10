@@ -15,6 +15,10 @@ pub struct WorldManifest {
     pub name: String,
     /// One line about what it is for.
     pub tagline: String,
+    /// What it is for, in a word or three (`Habits and diary`): shown under
+    /// its name in the app menu and the tray.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// `owner/name` on GitHub, where releases and the app downloads live.
     pub repo: String,
     /// The planet a moon belongs to, e.g. `neptune` for Triton.
@@ -249,6 +253,7 @@ mod tests {
             "id": "terra",
             "name": "Terra",
             "tagline": "Habits, diary and wellbeing",
+            "role": "Habits and diary",
             "repo": "Draysh/sol-terra",
             "emits": [{ "type": "terra.habit.checked", "label": "A habit is ticked" }],
             "actions": [{ "id": "tick-habit", "label": "Tick a habit",
@@ -266,6 +271,7 @@ mod tests {
             manifest().problems()
         );
         assert!(manifest().action("tick-habit").is_some());
+        assert_eq!(manifest().role.as_deref(), Some("Habits and diary"));
     }
 
     #[test]

@@ -30,6 +30,7 @@ world from GitHub.
   "id": "terra",
   "name": "Terra",
   "tagline": "Habits, diary and wellbeing",
+  "role": "Habits and diary",
   "repo": "Draysh/sol-terra",
   "collections": [{ "id": "habits", "label": "Habits" }],
   "emits": [{ "type": "terra.habit.checked", "label": "A habit is ticked" }],
@@ -38,7 +39,8 @@ world from GitHub.
       "params": [{ "key": "habit", "label": "Habit", "kind": "text", "required": true }] }
   ],
   "settings": [
-    { "key": "day_starts", "label": "Day starts at", "kind": "time", "default": "04:00" }
+    { "key": "day_starts", "label": "Day starts at", "kind": "time", "default": "04:00",
+      "hint": "Ticks and writing before this count for the day before." }
   ],
   "connections": [
     { "when": "mercury.review.finished", "then_world": "terra", "then_action": "tick-habit",
@@ -48,12 +50,20 @@ world from GitHub.
 ```
 
 - `id`: lowercase letters, digits and dashes; also the world's event namespace.
+- `tagline`: one line about what it is for; `role` (optional): the same in a
+  word or three (`Habits and diary`), shown under its name in the app menu
+  and the tray.
+- `repo`: `owner/name` on GitHub, where its releases are.
+- `parent` (optional): the planet a moon belongs to, e.g. `neptune` for Triton.
 - `collections`: what the world keeps in Sol, named for the data overview.
 - `emits`: events connections can listen for.
-- `actions`: what the world can do when a connection fires.
+- `actions`: what the world can do when a connection fires, each with
+  `params` (fields with a `key`, `label`, `kind`, optional `hint` and
+  `required`).
 - `settings`: set once in Sol, read by every paired device. Kinds are `text`,
   `url`, `secret` (handed only to the world's own devices, never shown again),
-  `number`, `toggle` and `time` (`HH:MM`). A setting with `"shared":
+  `number`, `toggle` and `time` (`HH:MM`). A setting may have a `default`
+  and a `hint` (one line shown under it). A setting with `"shared":
   "navidrome-url"` has one value for every world whose setting names the
   same thing: set in any of them, Sol keeps it once, hands it to all of them
   and sends each of them `sol.settings` when it changes. Use it for what the
@@ -69,7 +79,10 @@ world from GitHub.
 
 Installing a world in Sol gives it a database and lets its apps pair. Its
 releases on GitHub carry the app downloads, which Sol's world page offers per
-platform (`.AppImage`, `.deb`, `.rpm`, `.msi`, `.exe`, `.dmg`, `.apk`).
+platform by file name: Linux for `.AppImage`, `.deb`, `.rpm` and a `.tar.gz`
+with `linux` in its name, Windows for `.msi` and `.exe`, macOS for `.dmg` and
+`.app.tar.gz`, Android for `.apk` and `.aab`. Today every world ships one
+file, the Linux `.tar.gz` (see [Versions and updates](#versions-and-updates)).
 
 ## Pairing
 
@@ -117,6 +130,7 @@ names are lowercase (`habits`, `check_ins`); ids are letters, digits, `-` and
 - `summary` is one sentence for people; Sol's activity log and notifications
   show it as written.
 - Send an `id` (UUIDv7) to make retries safe; the same id is stored once.
+- `v` is the version of `data`'s shape for this type (`1` when left out).
 
 When an event's type matches a connection someone made in Sol ("when Mercury
 finishes a review, tick the Japanese habit in Terra"), Sol puts a delivery in
@@ -125,7 +139,8 @@ the target world's inbox. The app reads it with
 
 ```json
 { "deliveries": [{ "n": 7, "action": "tick-habit", "params": { "habit": "Japanese" },
-                   "event": { "type": "mercury.review.finished", … }, "connection": "…" }],
+                   "event": { "type": "mercury.review.finished", … }, "connection": "…",
+                   "created_at": "2026-03-01T19:04:00Z" }],
   "next": 7 }
 ```
 
@@ -152,9 +167,12 @@ in whichever world it was set.
 
 `PUT /api/v1/widgets/{id}` with `{ "title", "view" }` replaces one of the
 world's widgets on Sol's dashboard; `DELETE` takes it away. The view is a
-`WidgetView`: a `figure` and `caption`, a `progress`, `rows` of `label: value`,
-and `items` (a checklist when they have `done`; `toggle: true` lets people tick
-them from the dashboard). Push again whenever what it shows changes.
+`WidgetView`, where every part is optional: a `figure` and `caption`, a
+`progress` (`{ value, max }`), `rows` of `label: value`, `items` (`{ id, label,
+meta?, done?, toggle? }`: `meta` is a short note on the right, such as a streak;
+a checklist when they have `done`; `toggle: true` lets people tick them from
+the dashboard) and `empty`, a sentence shown when there is nothing else to
+show. Push again whenever what it shows changes.
 
 ## Versions and updates
 
@@ -175,20 +193,32 @@ Apps never ask GitHub for updates (the repositories can be private):
    (`kind`: `portable`, `setup`, `deb`, `rpm`; see `orbit::update`). Sol looks
    at the world's latest GitHub release with its own token and answers
    `{ latest, offer, message }`. `offer` is there when a newer version has a
-   signed file for that target and kind: `{ version, notes, file, size,
-   download, signature }`.
-2. `GET <offer.download>` streams the file through Sol.
-3. The app checks `signature` (minisign, as `tauri signer sign` writes it)
-   against the public key built into it, and only then installs.
+   signed file for that target and kind: `{ version, notes, published_at,
+   file, size, download, signature }`.
+2. `GET <offer.download>` (`/api/v1/update/download/{asset}`) streams the
+   file through Sol.
+3. The app checks `signature` against the public key built into it, and only
+   then installs. It is a minisign signature in the base64 text form `tauri
+   signer sign` writes, which is what Sol's `scripts/sign-releases.sh` makes
+   with the person's update key.
 
-Release files are named `sol-<world>-<version>-<target><suffix>` with a
-`.sig` next to each: `.tar.gz` (the binary alone; installs and updates
-itself), `.deb`, `.rpm`, `-setup.exe`. `orbit::updates::Updates` does all of
-this for a Rust app.
+Release files are named `sol-<world>-<version>-<target><suffix>`, and Sol
+offers one only when its signature sits beside it as `<file>.sig`. It picks
+the file that starts with `sol-<world>-`, contains `-<target>` and ends with
+the kind's suffix: `.tar.gz` (`portable`), `-setup.exe` (`setup`), `.deb`,
+`.rpm`. What the worlds ship today is the Linux one alone:
+`sol-<world>-<version>-linux-x86_64.tar.gz`, holding a single file
+`sol-<world>` (an AppImage with Qt inside from the release workflow, or a
+binary linked to the computer's own Qt from Sol's `scripts/build-linux.sh`),
+and its `.sig`. The other kinds are what Sol can serve once a world builds
+them. `orbit::updates::Updates` does all of this for a Rust app.
 
 ## Errors
 
 Every error is `{ "error": "<code>", "message": "<a sentence for people>" }`
-with the matching status: `400` bad input, `401` not paired (any more), `404`
-missing, `409` conflict, `410` pairing gone, `426` protocol mismatch, `429`
-too many tries.
+with the matching status: `400` bad input, `401` not paired (any more), `403`
+refused (a cross-origin request to Sol's web API, a wrong setup code), `404`
+missing, `409` conflict, `410` pairing gone, `413` a document over 1 MiB,
+`426` protocol mismatch, `429` too many tries, `500` something went wrong in
+Sol (the details stay in its log), `502` GitHub didn't hand over a release
+file.

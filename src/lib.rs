@@ -10,11 +10,10 @@
 //! ([`db`]) and logging ([`telemetry`]). Features add the app side:
 //! `client` the HTTP client ([`client::Sol`]), `keystore` the system keyring,
 //! and `app` both plus [`link::Link`], the whole engine a world's app runs on,
-//! with [`install`] and [`updates`] for installing and updating itself,
-//! [`moons`] for moons that run with their planet, [`doors`] for opening
-//! the other worlds' apps on the same computer, and on Linux [`frames`],
-//! so its window paints at the screen's rate, and [`mouse`], so the mouse's
-//! back and forward buttons reach the page.
+//! with [`clock`] for the person's day, [`install`] and [`updates`] for
+//! installing and updating itself,
+//! [`moons`] for moons that run with their planet, and [`doors`] for opening
+//! the other worlds' apps on the same computer.
 //! `docs/protocol.md` describes the protocol.
 
 pub mod db;
@@ -30,9 +29,9 @@ pub mod world;
 #[cfg(feature = "client")]
 pub mod client;
 #[cfg(feature = "app")]
+pub mod clock;
+#[cfg(feature = "app")]
 pub mod doors;
-#[cfg(all(feature = "app", target_os = "linux"))]
-pub mod frames;
 #[cfg(feature = "app")]
 pub mod install;
 #[cfg(feature = "keystore")]
@@ -41,8 +40,6 @@ pub mod keystore;
 pub mod link;
 #[cfg(feature = "app")]
 pub mod moons;
-#[cfg(all(feature = "app", target_os = "linux"))]
-pub mod mouse;
 #[cfg(feature = "app")]
 pub mod updates;
 
