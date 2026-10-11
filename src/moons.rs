@@ -328,12 +328,18 @@ mod tests {
         let base = dir.path();
         settle_in(base, "neptune", "triton", base.join("sol-triton")).unwrap();
         let file = entry_path(base, "neptune", "triton");
-        let before = std::fs::metadata(&file).unwrap().modified().unwrap();
-        std::thread::sleep(Duration::from_millis(20));
+        // Dated long ago, so a write now would show without waiting for the clock.
+        let long_ago = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
         settle_in(base, "neptune", "triton", base.join("sol-triton")).unwrap();
         assert_eq!(
             std::fs::metadata(&file).unwrap().modified().unwrap(),
-            before
+            long_ago
         );
     }
 
@@ -344,9 +350,10 @@ mod tests {
         let held = hold(&base, "terra").expect("the lock");
         let gone = tokio::spawn({
             let base = base.clone();
-            async move { planet_gone_in(&base, "terra", Duration::from_millis(100)).await }
+            async move { planet_gone_in(&base, "terra", Duration::from_millis(40)).await }
         });
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Longer than the grace: a moon that didn't wait on the lock would be gone.
+        tokio::time::sleep(Duration::from_millis(120)).await;
         assert!(!gone.is_finished(), "the planet still runs");
         let left = std::time::Instant::now();
         drop(held);
@@ -360,13 +367,14 @@ mod tests {
         let held = hold(&base, "terra").expect("the lock");
         let gone = tokio::spawn({
             let base = base.clone();
-            async move { planet_gone_in(&base, "terra", Duration::from_millis(400)).await }
+            async move { planet_gone_in(&base, "terra", Duration::from_millis(250)).await }
         });
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
         drop(held);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
         let _again = hold(&base, "terra").expect("the lock again");
-        tokio::time::sleep(Duration::from_millis(700)).await;
+        // Past the grace: the moon looked, found its planet back, and waits again.
+        tokio::time::sleep(Duration::from_millis(400)).await;
         assert!(!gone.is_finished(), "the planet came back");
     }
 

@@ -153,12 +153,18 @@ mod tests {
         let base = dir.path();
         settle_in(base, "terra", base.join("sol-terra")).unwrap();
         let file = entry_path(base, "terra");
-        let before = std::fs::metadata(&file).unwrap().modified().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Dated long ago, so a write now would show without waiting for the clock.
+        let long_ago = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
         settle_in(base, "terra", base.join("sol-terra")).unwrap();
         assert_eq!(
             std::fs::metadata(&file).unwrap().modified().unwrap(),
-            before
+            long_ago
         );
     }
 }
