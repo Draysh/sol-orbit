@@ -47,6 +47,59 @@ impl Link {
             .await??)
     }
 
+    /// Every live document in a collection whose id starts with `prefix`
+    /// (a title's episodes, `<key>_`), by id. It reads only those rows, by
+    /// the local copy's index, so it stays quick however large the
+    /// collection grows.
+    pub async fn list_prefix(&self, collection: &str, prefix: &str) -> anyhow::Result<Vec<Doc>> {
+        let (collection, from, to) = (collection.to_owned(), prefix.to_owned(), past(prefix));
+        Ok(self
+            .0
+            .db
+            .call(move |c| {
+                c.prepare_cached(&format!(
+                    "SELECT {COLUMNS} FROM docs WHERE collection = ?1 AND id >= ?2 AND id < ?3
+                     AND deleted = 0 ORDER BY id"
+                ))?
+                .query_map(params![collection, from, to], doc)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await??)
+    }
+
+    /// The same as `T`, each with its id; documents of another shape are
+    /// left out (the whole collection's listing logs how many).
+    pub async fn list_prefix_as<T: DeserializeOwned>(
+        &self,
+        collection: &str,
+        prefix: &str,
+    ) -> anyhow::Result<Vec<(String, T)>> {
+        Ok(self
+            .list_prefix(collection, prefix)
+            .await?
+            .into_iter()
+            .filter_map(|d| Some((d.id, serde_json::from_value(d.data).ok()?)))
+            .collect())
+    }
+
+    /// How many live documents a collection has whose id starts with
+    /// `prefix` (`""` for all of them), counted in the local copy without
+    /// reading them.
+    pub async fn count(&self, collection: &str, prefix: &str) -> anyhow::Result<usize> {
+        let (collection, from, to) = (collection.to_owned(), prefix.to_owned(), past(prefix));
+        Ok(self
+            .0
+            .db
+            .call(move |c| {
+                c.prepare_cached(
+                    "SELECT count(*) FROM docs WHERE collection = ?1 AND id >= ?2 AND id < ?3
+                     AND deleted = 0",
+                )?
+                .query_row(params![collection, from, to], |r| r.get::<_, i64>(0))
+            })
+            .await?? as usize)
+    }
+
     pub async fn get(&self, collection: &str, id: &str) -> anyhow::Result<Option<Doc>> {
         let (collection, id) = (collection.to_owned(), id.to_owned());
         Ok(self
@@ -232,6 +285,12 @@ impl Link {
         self.wrote(&[collection.to_owned()]).await;
         Ok(())
     }
+}
+
+/// The first id past every id that starts with `prefix`: ids are ASCII,
+/// and the last character of Unicode sorts after all of it.
+fn past(prefix: &str) -> String {
+    format!("{prefix}{}", char::MAX)
 }
 
 fn check_names(collection: &str, id: &str) -> anyhow::Result<()> {

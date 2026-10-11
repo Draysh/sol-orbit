@@ -446,6 +446,31 @@ impl Link {
             .unwrap_or(chrono_tz::Tz::UTC)
     }
 
+    /// For tests: writes down a pairing with `server` as `person`, as the
+    /// device `device`, for the copy to pick up when it is opened again.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) async fn pretend_paired(
+        &self,
+        server: &str,
+        device: &str,
+        person: &Person,
+    ) -> anyhow::Result<()> {
+        let (server, device, user) = (
+            server.to_owned(),
+            device.to_owned(),
+            serde_json::to_string(person)?,
+        );
+        self.0
+            .db
+            .call(move |c| -> rusqlite::Result<()> {
+                cache::set_meta(c, "server", &server)?;
+                cache::set_meta(c, "device", &device)?;
+                cache::set_meta(c, "user", &user)
+            })
+            .await??;
+        Ok(())
+    }
+
     /// Posts an event, in order with the writes before it.
     pub async fn emit(&self, mut event: Emit) -> anyhow::Result<()> {
         event.id.get_or_insert_with(uuid::Uuid::now_v7);

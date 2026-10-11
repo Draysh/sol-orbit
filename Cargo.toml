@@ -20,6 +20,9 @@ keystore = ["dep:keyring", "dep:zbus"]
 # `orbit::link::Link`: everything a world's app needs: pairing, the token in
 # the keyring, a local copy of its data that works offline, and sync.
 app = ["client", "keystore", "tokio/macros", "dep:base64", "dep:flate2", "dep:minisign-verify", "dep:tar", "dep:futures-util", "dep:chrono-tz"]
+# `orbit::testing`: an offline Link, a stand-in Sol and a canned HTTP server,
+# for tests here and in the world apps (as a dev-dependency feature).
+testing = ["app", "dep:tempfile"]
 
 [dependencies]
 anyhow = "1"
@@ -37,6 +40,7 @@ semver = "1.0.28"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tar = { version = "0.4.46", default-features = false, optional = true }
+tempfile = { version = "3", optional = true }
 thiserror = { version = "2", optional = true }
 tokio = { version = "1.53", features = ["sync", "rt"] }
 tracing = "0.1.44"

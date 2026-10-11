@@ -117,9 +117,53 @@ impl Write for Handle {
     }
 }
 
+/// How often the same kind of damaged data is logged again.
+const DAMAGED_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Logs a warning that something stored or received didn't read (a
+/// document's data, a date, a delivery's parameters), which the caller then
+/// treats as empty. Each `what` is logged at most once a minute, so a
+/// damaged table read on every request doesn't flood the log.
+pub fn damaged(what: &'static str, err: impl std::fmt::Display) {
+    if first_in_a_while(what, std::time::Instant::now()) {
+        tracing::warn!(what, %err, "damaged data read as empty");
+    }
+}
+
+fn first_in_a_while(what: &'static str, now: std::time::Instant) -> bool {
+    static LAST: Mutex<Vec<(&str, std::time::Instant)>> = Mutex::new(Vec::new());
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    match last.iter_mut().find(|(w, _)| *w == what) {
+        Some((_, at)) if now.duration_since(*at) < DAMAGED_EVERY => false,
+        Some((_, at)) => {
+            *at = now;
+            true
+        }
+        None => {
+            last.push((what, now));
+            true
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damaged_data_is_logged_once_a_minute() {
+        let now = std::time::Instant::now();
+        assert!(super::first_in_a_while("test row", now));
+        assert!(!super::first_in_a_while(
+            "test row",
+            now + std::time::Duration::from_secs(5)
+        ));
+        assert!(super::first_in_a_while("another row", now));
+        assert!(super::first_in_a_while(
+            "test row",
+            now + std::time::Duration::from_secs(61)
+        ));
+    }
 
     #[test]
     fn a_log_starts_again_when_it_grows() {

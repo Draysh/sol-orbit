@@ -22,9 +22,15 @@ pub(super) fn doc(row: &Row) -> rusqlite::Result<Doc> {
         version: row.get(2)?,
         updated_at: DateTime::parse_from_rfc3339(&row.get::<_, String>(3)?)
             .map(|t| t.with_timezone(&Utc))
-            .unwrap_or_default(),
+            .unwrap_or_else(|err| {
+                crate::telemetry::damaged("a document's time in the local copy", err);
+                DateTime::default()
+            }),
         deleted: row.get(4)?,
-        data: serde_json::from_str(&data).unwrap_or_default(),
+        data: serde_json::from_str(&data).unwrap_or_else(|err| {
+            crate::telemetry::damaged("a document's data in the local copy", err);
+            serde_json::Value::Null
+        }),
     })
 }
 

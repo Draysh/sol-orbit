@@ -13,7 +13,8 @@
 //! with [`clock`] for the person's day, [`install`] and [`updates`] for
 //! installing and updating itself,
 //! [`moons`] for moons that run with their planet, and [`doors`] for opening
-//! the other worlds' apps on the same computer.
+//! the other worlds' apps on the same computer. `testing` adds
+//! the `testing` module: an offline link, a stand-in Sol and a canned HTTP server.
 //! `docs/protocol.md` describes the protocol.
 
 pub mod db;
@@ -40,6 +41,8 @@ pub mod keystore;
 pub mod link;
 #[cfg(feature = "app")]
 pub mod moons;
+#[cfg(all(feature = "app", any(test, feature = "testing")))]
+pub mod testing;
 #[cfg(feature = "app")]
 pub mod updates;
 

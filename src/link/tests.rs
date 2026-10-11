@@ -1,30 +1,14 @@
 use serde_json::json;
 
-use super::{
-    cache::{cursor, set_meta},
-    pairing::normalise,
-    *,
+use super::{cache::cursor, pairing::normalise, *};
+use crate::{
+    Doc,
+    testing::{Reply, Requests, StandInSol, offline, puts},
 };
-use crate::Doc;
-
-async fn offline() -> (Link, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let link = Link::open(Config {
-        world: "terra".into(),
-        dir: dir.path().to_owned(),
-        device: "Test".into(),
-        platform: None,
-        version: "0.1.0".into(),
-        tokens: Tokens::File,
-    })
-    .await
-    .unwrap();
-    (link, dir)
-}
 
 #[tokio::test]
 async fn works_offline_and_queues_in_order() {
-    let (link, _dir) = offline().await;
+    let (link, _dir) = offline("terra").await;
     assert_eq!(link.status(), Status::Unpaired { error: None });
 
     let walk = link
@@ -62,7 +46,7 @@ async fn works_offline_and_queues_in_order() {
 
 #[tokio::test]
 async fn changes_from_sol_wait_behind_local_writes() {
-    let (link, _dir) = offline().await;
+    let (link, _dir) = offline("terra").await;
     link.put("habits", "walk", json!({ "name": "Mine" }))
         .await
         .unwrap();
@@ -108,7 +92,7 @@ async fn documents_come_back_as_types() {
         name: String,
         weight: f32,
     }
-    let (link, _dir) = offline().await;
+    let (link, _dir) = offline("terra").await;
     let walk = Habit {
         name: "Walk".into(),
         weight: 7.3,
@@ -147,8 +131,64 @@ async fn documents_come_back_as_types() {
 }
 
 #[tokio::test]
+async fn documents_are_found_and_counted_by_the_start_of_their_id() {
+    let (link, _dir) = offline("saturn").await;
+    for id in [
+        "anilist-1_s1e1",
+        "anilist-1_s1e2",
+        "anilist-1_r1_s1e1",
+        "anilist-12_s1e1",
+        "anilist-2_s1e1",
+    ] {
+        link.put("watched", id, json!({ "id": id })).await.unwrap();
+    }
+    link.put("titles", "anilist-1_s1e9", json!({}))
+        .await
+        .unwrap();
+    link.delete("watched", "anilist-1_s1e2").await.unwrap();
+
+    let ids = |docs: Vec<Doc>| docs.into_iter().map(|d| d.id).collect::<Vec<_>>();
+    assert_eq!(
+        ids(link.list_prefix("watched", "anilist-1_").await.unwrap()),
+        ["anilist-1_r1_s1e1", "anilist-1_s1e1"],
+        "only that title's, without the deleted one or another collection's"
+    );
+    assert_eq!(
+        ids(link.list_prefix("watched", "anilist-1_s").await.unwrap()),
+        ["anilist-1_s1e1"]
+    );
+    assert_eq!(link.count("watched", "anilist-1_").await.unwrap(), 2);
+    assert_eq!(link.count("watched", "anilist-").await.unwrap(), 4);
+    assert_eq!(link.count("watched", "").await.unwrap(), 4);
+    assert_eq!(link.count("watched", "tmdb-").await.unwrap(), 0);
+    let typed: Vec<(String, serde_json::Value)> =
+        link.list_prefix_as("watched", "anilist-2").await.unwrap();
+    assert_eq!(typed.len(), 1);
+
+    // Both go by the index, never through the whole table.
+    let plan = link
+        .0
+        .db
+        .call(|c| {
+            c.query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM docs
+                 WHERE collection = 'watched' AND id >= 'a' AND id < 'b' AND deleted = 0",
+                [],
+                |r| r.get::<_, String>(3),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        plan.contains("USING INDEX") && plan.contains("id>?"),
+        "{plan}"
+    );
+}
+
+#[tokio::test]
 async fn settings_are_followed_from_the_start() {
-    let (link, _dir) = offline().await;
+    let (link, _dir) = offline("terra").await;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let follow = tokio::spawn(link.on_settings(move |why| {
         let tx = tx.clone();
@@ -184,115 +224,27 @@ fn addresses() {
 
 /// Stands in for Sol: answers the first document write with `429` and
 /// `Retry-After: 2`, the next one with the document, and holds long polls.
-async fn busy_sol() -> (String, Arc<Mutex<Vec<(std::time::Instant, String)>>>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let log = seen.clone();
-    tokio::spawn(async move {
-        loop {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let log = log.clone();
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                let (head, body_len) = loop {
-                    let n = sock.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let head = String::from_utf8_lossy(&buf[..end]).into_owned();
-                        let len = head
-                            .lines()
-                            .find_map(|l| {
-                                l.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
-                            })
-                            .unwrap_or(0);
-                        break (head, end + 4 + len);
-                    }
-                };
-                while buf.len() < body_len {
-                    let n = sock.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                let line = head.lines().next().unwrap_or_default().to_owned();
-                let writes = {
-                    let mut log = log.lock().unwrap();
-                    log.push((std::time::Instant::now(), line.clone()));
-                    log.iter().filter(|(_, l)| l.starts_with("PUT ")).count()
-                };
-                let (status, extra, body) = if line.starts_with("PUT ") && writes == 1 {
-                    (
-                        "429 Too Many Requests",
-                        "retry-after: 2\r\n",
-                        r#"{"error":"rate_limited","message":"Sol takes more again shortly"}"#
-                            .to_owned(),
-                    )
-                } else if line.starts_with("PUT ") {
-                    (
-                        "200 OK",
-                        "",
-                        r#"{"collection":"habits","id":"walk","version":1,"updated_at":"2026-10-10T08:00:00Z","deleted":false,"data":{"name":"Walk"}}"#.to_owned(),
-                    )
-                } else if line.contains("/api/v1/settings") {
-                    ("200 OK", "", "{}".to_owned())
-                } else {
-                    // Long polls: nothing yet.
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                    return;
-                };
-                let res = format!(
-                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = sock.write_all(res.as_bytes()).await;
-            });
+fn busy_sol() -> StandInSol {
+    StandInSol::start(|request, seen| {
+        if request.method != "PUT" {
+            return None;
         }
-    });
-    (base, seen)
+        Some(if seen.with_method("PUT").len() == 1 {
+            Reply::new(
+                429,
+                r#"{"error":"rate_limited","message":"Sol takes more again shortly"}"#,
+            )
+            .with_header("retry-after", "2")
+        } else {
+            Reply::ok(doc_json("walk", 1, "Walk"))
+        })
+    })
 }
 
 #[tokio::test]
 async fn a_busy_sol_is_given_the_time_it_asks_for() {
-    let (base, seen) = busy_sol().await;
-    let (link, dir) = offline().await;
-    // As if paired with that Sol.
-    let user = serde_json::to_string(&Person {
-        id: "u1".into(),
-        username: "lukas".into(),
-        tz: "Europe/Copenhagen".into(),
-    })
-    .unwrap();
-    link.0
-        .db
-        .call(move |c| -> rusqlite::Result<()> {
-            set_meta(c, "server", &base)?;
-            set_meta(c, "device", "d1")?;
-            set_meta(c, "user", &user)
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    std::fs::write(dir.path().join("terra-d1.token"), "sol_test").unwrap();
-    drop(link);
-    let link = Link::open(Config {
-        world: "terra".into(),
-        dir: dir.path().to_owned(),
-        device: "Test".into(),
-        platform: None,
-        version: "0.1.0".into(),
-        tokens: Tokens::File,
-    })
-    .await
-    .unwrap();
+    let sol = busy_sol();
+    let (link, _dir) = sol.paired("terra", "u1").await;
     link.put("habits", "walk", json!({ "name": "Walk" }))
         .await
         .unwrap();
@@ -321,12 +273,11 @@ async fn a_busy_sol_is_given_the_time_it_asks_for() {
         0,
         "the write went through in the end"
     );
-    let puts: Vec<std::time::Instant> = seen
-        .lock()
-        .unwrap()
+    let puts: Vec<std::time::Instant> = sol
+        .requests()
         .iter()
-        .filter(|(_, l)| l.starts_with("PUT "))
-        .map(|(t, _)| *t)
+        .filter(|r| r.method == "PUT")
+        .map(|r| r.at)
         .collect();
     assert_eq!(puts.len(), 2, "one refused, one taken");
     assert!(
@@ -342,7 +293,7 @@ async fn a_busy_sol_is_given_the_time_it_asks_for() {
 
 #[tokio::test]
 async fn a_restored_sol_is_read_again_from_the_start() {
-    let (link, _dir) = offline().await;
+    let (link, _dir) = offline("terra").await;
     let doc = |id: &str, version: i64| Doc {
         collection: "habits".into(),
         id: id.into(),
@@ -428,107 +379,17 @@ async fn a_restored_sol_is_read_again_from_the_start() {
 
 // ---- Writes are kept, never lost ---------------------------------------------
 
-/// One request a stand-in Sol saw: its first line and its body.
-type Seen = Arc<Mutex<Vec<(String, String)>>>;
-/// How a stand-in Sol answers a request (`None`: holds it, as a long poll).
-type Answer = Arc<dyn Fn(&str, &str, &Seen) -> Option<(u16, String)> + Send + Sync>;
-
-/// A stand-in Sol that answers each request with `answer`.
-async fn stand_in(answer: Answer) -> (String, Seen) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let seen: Seen = Arc::default();
-    let log = seen.clone();
-    tokio::spawn(async move {
-        loop {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let (log, answer) = (log.clone(), answer.clone());
-            tokio::spawn(async move {
-                let mut buf = Vec::new();
-                let mut chunk = [0u8; 4096];
-                let (head, start, len) = loop {
-                    let n = sock.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        return;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                    if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                        let head = String::from_utf8_lossy(&buf[..end]).into_owned();
-                        let len = head
-                            .lines()
-                            .find_map(|l| {
-                                l.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
-                            })
-                            .unwrap_or(0);
-                        break (head, end + 4, len);
-                    }
-                };
-                while buf.len() < start + len {
-                    let n = sock.read(&mut chunk).await.unwrap_or(0);
-                    if n == 0 {
-                        break;
-                    }
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                let line = head.lines().next().unwrap_or_default().to_owned();
-                let body = String::from_utf8_lossy(&buf[start..]).into_owned();
-                log.lock().unwrap().push((line.clone(), body.clone()));
-                let Some((status, reply)) = answer(&line, &body, &log) else {
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                    return;
-                };
-                let res = format!(
-                    "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
-                    reply.len()
-                );
-                let _ = sock.write_all(res.as_bytes()).await;
-            });
-        }
-    });
-    (base, seen)
-}
-
-fn lukas(id: &str) -> Person {
-    Person {
-        id: id.into(),
-        username: "lukas".into(),
-        tz: "Europe/Copenhagen".into(),
-    }
-}
-
-/// A link that is paired with the Sol at `base` as `person`, not yet syncing.
-async fn paired_with(base: &str, person: &str) -> (Link, tempfile::TempDir) {
-    let (link, dir) = offline().await;
-    let (base, user) = (
-        base.to_owned(),
-        serde_json::to_string(&lukas(person)).unwrap(),
-    );
-    link.0
-        .db
-        .call(move |c| -> rusqlite::Result<()> {
-            set_meta(c, "server", &base)?;
-            set_meta(c, "device", "d1")?;
-            set_meta(c, "user", &user)
+/// A stand-in Sol that hands each document write (its body, and every
+/// request so far) to `put`, and holds the long polls.
+fn sol_with(
+    put: impl Fn(&serde_json::Value, &Requests) -> (u16, String) + Send + Sync + 'static,
+) -> StandInSol {
+    StandInSol::start(move |request, seen| {
+        (request.method == "PUT").then(|| {
+            let (status, body) = put(&request.json(), seen);
+            Reply::new(status, body)
         })
-        .await
-        .unwrap()
-        .unwrap();
-    std::fs::write(dir.path().join("terra-d1.token"), "sol_test").unwrap();
-    drop(link);
-    let link = Link::open(Config {
-        world: "terra".into(),
-        dir: dir.path().to_owned(),
-        device: "Test".into(),
-        platform: None,
-        version: "0.1.0".into(),
-        tokens: Tokens::File,
     })
-    .await
-    .unwrap();
-    (link, dir)
 }
 
 async fn until(what: &str, mut ok: impl AsyncFnMut() -> bool) {
@@ -547,31 +408,9 @@ fn doc_json(id: &str, version: i64, name: &str) -> String {
     )
 }
 
-/// Answers settings, holds long polls, and hands document writes to `put`.
-fn sol_with(put: impl Fn(&str, &Seen) -> (u16, String) + Send + Sync + 'static) -> Answer {
-    Arc::new(move |line, body, seen| {
-        if line.starts_with("PUT ") {
-            Some(put(body, seen))
-        } else if line.contains("/api/v1/settings") {
-            Some((200, "{}".into()))
-        } else {
-            None
-        }
-    })
-}
-
-fn puts(seen: &Seen) -> Vec<serde_json::Value> {
-    seen.lock()
-        .unwrap()
-        .iter()
-        .filter(|(l, _)| l.starts_with("PUT "))
-        .map(|(_, b)| serde_json::from_str(b).unwrap())
-        .collect()
-}
-
 #[tokio::test]
 async fn unpairing_keeps_waiting_writes_for_the_same_person() {
-    let (link, _dir) = paired_with("http://127.0.0.1:9", "u1").await;
+    let (link, _dir) = crate::testing::paired_with("http://127.0.0.1:9", "terra", "u1").await;
     link.put("habits", "walk", json!({ "name": "Walk" }))
         .await
         .unwrap();
@@ -603,7 +442,7 @@ async fn unpairing_keeps_waiting_writes_for_the_same_person() {
         token: "sol_again".into(),
         device_id: "d2".into(),
         world: "terra".into(),
-        user: lukas(who),
+        user: crate::testing::person(who),
     };
     link.finish("http://127.0.0.1:9", paired("u1"))
         .await
@@ -649,14 +488,13 @@ async fn unpairing_keeps_waiting_writes_for_the_same_person() {
 
 #[tokio::test]
 async fn a_401_from_sol_sets_the_writes_aside() {
-    let (base, _) = stand_in(sol_with(|_, _| {
+    let sol = sol_with(|_, _| {
         (
             401,
             r#"{"error":"unauthorized","message":"this device was unpaired"}"#.into(),
         )
-    }))
-    .await;
-    let (link, _dir) = paired_with(&base, "u1").await;
+    });
+    let (link, _dir) = sol.paired("terra", "u1").await;
     link.put("habits", "walk", json!({ "name": "Walk" }))
         .await
         .unwrap();
@@ -671,12 +509,11 @@ async fn a_401_from_sol_sets_the_writes_aside() {
 
 #[tokio::test]
 async fn writes_build_on_the_version_they_were_made_on() {
-    let (base, seen) = stand_in(sol_with(|_, seen| {
+    let sol = sol_with(|_, seen| {
         let n = puts(seen).len() as i64;
         (200, doc_json("walk", 10 + n, "Walk"))
-    }))
-    .await;
-    let (link, _dir) = paired_with(&base, "u1").await;
+    });
+    let (link, _dir) = sol.paired("terra", "u1").await;
     // Sol's copy is at version 7 when the two writes are made.
     link.apply(crate::doc::ChangePage {
         changes: vec![serde_json::from_str(&doc_json("walk", 7, "Theirs")).unwrap()],
@@ -703,7 +540,7 @@ async fn writes_build_on_the_version_they_were_made_on() {
         link.unsent().await.unwrap() == 0
     })
     .await;
-    let sent = puts(&seen);
+    let sent = sol.puts();
     assert_eq!(sent[0]["if_version"], 7);
     // The second builds on the first one's new version (11), not on 7.
     assert_eq!(sent[1]["if_version"], 11);
@@ -717,9 +554,8 @@ async fn writes_build_on_the_version_they_were_made_on() {
 #[tokio::test]
 async fn a_conflict_keeps_both_copies() {
     // The first write meets another device's newer copy; later ones go in.
-    let (base, seen) = stand_in(sol_with(|body, seen| {
+    let sol = sol_with(|body, seen| {
         let n = puts(seen).len();
-        let body: serde_json::Value = serde_json::from_str(body).unwrap();
         if n == 1 {
             (
                 409,
@@ -732,9 +568,8 @@ async fn a_conflict_keeps_both_copies() {
             let name = body["data"]["name"].as_str().unwrap().to_owned();
             (200, doc_json("walk", 10, &name))
         }
-    }))
-    .await;
-    let (link, _dir) = paired_with(&base, "u1").await;
+    });
+    let (link, _dir) = sol.paired("terra", "u1").await;
     link.apply(crate::doc::ChangePage {
         changes: vec![serde_json::from_str(&doc_json("walk", 7, "Before")).unwrap()],
         next: 7,
@@ -783,10 +618,10 @@ async fn a_conflict_keeps_both_copies() {
         "Mine"
     );
     until("the chosen copy to go", async || {
-        link.unsent().await.unwrap() == 0 && puts(&seen).len() == 2
+        link.unsent().await.unwrap() == 0 && sol.puts().len() == 2
     })
     .await;
-    assert_eq!(puts(&seen)[1]["if_version"], 9);
+    assert_eq!(sol.puts()[1]["if_version"], 9);
     assert!(link.kept().await.unwrap().is_empty());
     assert!(
         link.keep_mine(kept[0].seq).await.is_err(),
@@ -798,7 +633,7 @@ async fn a_conflict_keeps_both_copies() {
 async fn a_lost_answer_is_not_a_conflict() {
     // Sol took the write, but its answer never came: sent again, it meets
     // its own copy, which says the same.
-    let (base, _) = stand_in(sol_with(|_, _| {
+    let sol = sol_with(|_, _| {
         (
             409,
             format!(
@@ -806,9 +641,8 @@ async fn a_lost_answer_is_not_a_conflict() {
                 doc_json("walk", 8, "Mine")
             ),
         )
-    }))
-    .await;
-    let (link, _dir) = paired_with(&base, "u1").await;
+    });
+    let (link, _dir) = sol.paired("terra", "u1").await;
     link.put("habits", "walk", json!({ "name": "Mine" }))
         .await
         .unwrap();
@@ -826,7 +660,7 @@ async fn a_lost_answer_is_not_a_conflict() {
 
 #[tokio::test]
 async fn a_rejected_write_is_kept_and_the_rest_go() {
-    let (base, _) = stand_in(sol_with(|_, seen| {
+    let sol = sol_with(|_, seen| {
         if puts(seen).len() == 1 {
             (
                 413,
@@ -835,9 +669,8 @@ async fn a_rejected_write_is_kept_and_the_rest_go() {
         } else {
             (200, doc_json("read", 3, "Read"))
         }
-    }))
-    .await;
-    let (link, _dir) = paired_with(&base, "u1").await;
+    });
+    let (link, _dir) = sol.paired("terra", "u1").await;
     link.put("habits", "walk", json!({ "name": "Huge" }))
         .await
         .unwrap();
@@ -861,6 +694,36 @@ async fn a_rejected_write_is_kept_and_the_rest_go() {
 }
 
 #[tokio::test]
+async fn a_damaged_write_is_kept_and_the_rest_go() {
+    let sol = sol_with(|_, _| (200, doc_json("read", 3, "Read")));
+    let (link, _dir) = sol.paired("terra", "u1").await;
+    link.0
+        .db
+        .call(|c| {
+            c.execute(
+                "INSERT INTO pending (kind, collection, id, body) VALUES ('put', 'habits', 'walk', '{not json')",
+                [],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    link.put("habits", "read", json!({ "name": "Read" }))
+        .await
+        .unwrap();
+    link.start(Arc::new(Ignore));
+    until("both to settle", async || link.unsent().await.unwrap() == 0).await;
+    let kept = link.kept_writes().await.unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].why, Why::Rejected);
+    assert!(kept[0].message.as_deref().unwrap().contains("damaged"));
+    assert_eq!(
+        link.get("habits", "read").await.unwrap().unwrap().version,
+        3
+    );
+}
+
+#[tokio::test]
 async fn a_copy_that_wont_open_says_why_and_can_be_set_aside() {
     let open = async |dir: &std::path::Path| {
         Link::open(Config {
@@ -874,7 +737,7 @@ async fn a_copy_that_wont_open_says_why_and_can_be_set_aside() {
         .await
     };
     // Written by a newer version, with a migration this one doesn't know.
-    let (link, dir) = offline().await;
+    let (link, dir) = offline("terra").await;
     link.put("habits", "walk", json!({ "name": "Walk" }))
         .await
         .unwrap();
@@ -930,16 +793,7 @@ async fn an_older_copy_is_backed_up_before_it_migrates() {
         )
         .unwrap();
     }
-    let link = Link::open(Config {
-        world: "terra".into(),
-        dir: dir.path().to_owned(),
-        device: "Test".into(),
-        platform: None,
-        version: "0.1.0".into(),
-        tokens: Tokens::File,
-    })
-    .await
-    .unwrap();
+    let link = crate::testing::open("terra", dir.path()).await;
     // The old waiting write is still there, with no version to build on.
     assert_eq!(link.unsent().await.unwrap(), 1);
     let copies = std::fs::read_dir(dir.path().join("backups"))

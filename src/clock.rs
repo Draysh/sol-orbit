@@ -4,6 +4,12 @@
 //! Until the person sets `day_starts`, a day begins at [`DEFAULT_DAY_STARTS`]
 //! (04:00), the default every world's manifest gives it.
 //!
+//! A world without a `day_starts` setting (Saturn, Neptune and their moons)
+//! lives by calendar days instead: [`Clock::calendar`], whose days begin at
+//! midnight in the person's zone. Either way "today" is never the machine's
+//! own zone or UTC's date: every date that means the person's day goes
+//! through a `Clock`.
+//!
 //! ```no_run
 //! # async fn run(link: orbit::link::Link) {
 //! use orbit::clock::Clock;
@@ -62,6 +68,17 @@ impl Clock {
             BTreeMap::new()
         });
         Self::with(link, &settings)
+    }
+
+    /// For a world without a `day_starts` setting: the person's time zone,
+    /// with days that begin at midnight.
+    pub fn calendar(link: &Link) -> Self {
+        Self::midnight(link.time_zone())
+    }
+
+    /// Calendar days in `tz`: each begins at midnight.
+    pub fn midnight(tz: Tz) -> Self {
+        Self::new(tz, NaiveTime::MIN)
     }
 
     /// The same, with the settings already read.
@@ -208,6 +225,24 @@ mod tests {
     }
 
     #[test]
+    fn calendar_days_begin_at_midnight_in_the_persons_zone() {
+        let clock = Clock::midnight("Europe/Warsaw".parse().unwrap());
+        // 23:30 UTC is already the next day in Warsaw, and 00:30 there is not the day before.
+        assert_eq!(
+            clock.day_of(utc("2026-10-09T23:30:00Z")),
+            date("2026-10-10")
+        );
+        assert_eq!(
+            clock.day_of(utc("2026-10-09T21:59:00Z")),
+            date("2026-10-09")
+        );
+        assert_eq!(
+            clock.start_of(date("2026-10-10")),
+            utc("2026-10-09T22:00:00Z")
+        );
+    }
+
+    #[test]
     fn days_begin_across_the_clock_changes() {
         let clock = warsaw("04:00");
         assert_eq!(
@@ -251,17 +286,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unpaired_link_lives_in_utc_from_four() {
-        let dir = tempfile::tempdir().unwrap();
-        let link = Link::open(crate::link::Config {
-            world: "terra".into(),
-            dir: dir.path().to_owned(),
-            device: "Test".into(),
-            platform: None,
-            version: "0.1.0".into(),
-            tokens: crate::link::Tokens::File,
-        })
-        .await
-        .unwrap();
+        let (link, _dir) = crate::testing::offline("terra").await;
         assert_eq!(link.time_zone(), Tz::UTC);
         assert_eq!(Clock::of(&link).await, Clock::default());
     }

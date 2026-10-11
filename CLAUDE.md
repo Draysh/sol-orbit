@@ -8,13 +8,17 @@ change it together with the types in `src/` and Sol's handlers.
 
 - Sol (`hub/crates/sol`) uses the shapes, `db` and `telemetry`, without
   features (its tests use `app`). `kit/quick`, the template and every world
-  app use feature `app`.
+  app use feature `app`, and their tests `testing` (through sol-quick's).
 - They build against a **git tag** of this repository (`orbit = { git, tag }`),
-  so an edit here reaches nothing until `hub/scripts/worlds.sh use-local`
-  points them at this checkout (it is on during the 2026-10 refactor; leave it).
+  so an edit here reaches nothing until they point at this checkout:
+  `hub/scripts/worlds.sh use-local` does it for `kit/quick`, the template
+  and the worlds (it is on now; leave it). The hub stays pinned to its tag.
 - Sol's tests (`hub/crates/sol/src/tests.rs`) drive the client and two `Link`
-  devices against a real Sol end to end: run `cargo test --workspace` in
-  `hub/` after changing either side.
+  devices against a real Sol end to end. After changing either side, run
+  them against this checkout without touching the hub's manifest: in `hub/`,
+  `cargo test --workspace --config
+  'patch."https://github.com/Draysh/sol-orbit".orbit.path="../kit/orbit"'`,
+  then `git checkout Cargo.lock` if the lock changed.
 - Releasing: bump `version` in `Cargo.toml`, tag `v<version>`, push, then
   `hub/scripts/worlds.sh use-tags <orbit> <design> <quick>` with the new tag
   and release the consumers. Tags and pushes are the person's.
@@ -60,18 +64,31 @@ Without features (the shapes, shared with Sol):
 - `link/cache.rs` + `cache.sql`, `cache-2.sql`: the local SQLite tables (opened with
   `db::open_with_backup`, copies in `backups/`) and their helpers.
 - `link/token.rs`: the token in the keyring or a private file.
-- `clock.rs`: `Clock`, the person's day (time zone and `day_starts`; unset, it is `DEFAULT_DAY_STARTS`, 04:00, as every manifest says).
+- `clock.rs`: `Clock`, the person's day: the time zone and `day_starts`
+  (unset, `DEFAULT_DAY_STARTS`, 04:00, which the manifests that declare it
+  default to: Terra, Luna, Mercury and the template). A world without the
+  setting uses `Clock::calendar`, midnight in the person's zone. Every
+  "today" goes through it.
 - `install.rs`, `updates.rs`: the app installing and updating itself: `verify_offer` (keys, the
   trusted comment's file, versions only up), a test start (`--version`, Qt major.minor), the switch
   keeping `<bin>.old` (fsynced), the trial (`.<bin>.trial`) and rollback (`.<bin>.rolled-back`).
 - `moons.rs`: moons started by their planet, leaving 5 s after it (they block on its lock);
   `doors.rs`: opening other worlds' apps.
 
+`testing` (`app` plus test helpers, for tests here and in the worlds):
+
+- `testing.rs`: `offline` / `open` (a `Link` with a local copy and no Sol),
+  `FakeHttp` (a canned HTTP server on 127.0.0.1: `routes` by method and
+  path, or `start` with a function; every `Request` kept, with its
+  headers, body and time), `Reply`, `StandInSol` (settings answered, long
+  polls held, the rest to a function; `paired` / `paired_with` for a link
+  paired with it as `person(id)`), `puts`.
+
 ## Tests
 
 Inline `mod tests` in each file, except `link/tests.rs` (`Link` offline,
-and against stand-in Sols that answer `429`, `401`, `409`, `413`: every
-rule about keeping writes has a test there). `tests/fixtures/` holds two
+and against `testing::StandInSol`s that answer `429`, `401`, `409`, `413`:
+every rule about keeping writes has a test there). `tests/fixtures/` holds two
 signed files and their keys for `updates.rs` (`update.txt`, and a release
 `.tar.gz` whose trusted comment names it, from Sol's tests). Sol's
 `nothing_written_is_lost` drives a conflict and a re-pairing end to end.
@@ -102,5 +119,6 @@ section says what may change. In short, new fields are optional
 - `Link` is shared by every world: world-specific behaviour belongs in the
   world's `Handler` or its own code, never here.
 
-Checks: `cargo fmt && cargo clippy --all-targets --features app -- -D warnings && cargo test --features app`,
-then `cargo clippy --all-targets -- -D warnings && cargo test` (no features).
+Checks: `cargo fmt && cargo clippy --all-targets --features app -- -D warnings &&
+cargo test --features app`, then `cargo clippy --all-targets -- -D warnings && cargo test`
+(no features), and `cargo clippy --all-targets --features testing -- -D warnings`.

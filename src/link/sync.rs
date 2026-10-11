@@ -73,11 +73,7 @@ impl Link {
                     let fresh = self
                         .0
                         .db
-                        .call(move |c| -> rusqlite::Result<bool> {
-                            let fresh = meta(c, "settings")?.as_deref() != Some(settings.as_str());
-                            set_meta(c, "settings", &settings)?;
-                            Ok(fresh)
-                        })
+                        .call(move |c| remember_settings(c, &settings))
                         .await??;
                     if fresh {
                         let _ = self.0.updates.send(Update::Settings);
@@ -170,42 +166,50 @@ impl Link {
                 return Ok(());
             };
             let (col, key) = (collection.unwrap_or_default(), id.unwrap_or_default());
-            let sent = match kind.as_str() {
-                "put" => client
-                    .put(&col, &key, serde_json::from_str(&body)?, base)
-                    .await
-                    .map(Some),
-                "delete" => match client.delete(&col, &key).await {
-                    Err(ClientError::Api { status: 404, .. }) => Ok(None),
-                    other => other.map(Some),
-                },
-                "event" => client
-                    .emit(&serde_json::from_str(&body)?)
-                    .await
-                    .map(|_| None),
-                "widget" => {
-                    let w: serde_json::Value = serde_json::from_str(&body)?;
-                    let view = serde_json::from_value(w["view"].clone())?;
-                    client
-                        .push_widget(&key, w["title"].as_str().unwrap_or_default(), view)
+            // A body that no longer reads (damaged on this computer) is
+            // kept aside like a write Sol rejected, so the rest still go.
+            let sent: Result<Result<Option<Doc>, ClientError>, serde_json::Error> = async {
+                Ok(match kind.as_str() {
+                    "put" => client
+                        .put(&col, &key, serde_json::from_str(&body)?, base)
                         .await
-                        .map(|()| None)
-                }
-                "unwidget" => client.remove_widget(&key).await.map(|()| None),
-                other => {
-                    tracing::warn!(kind = other, "dropping an unknown pending write");
-                    Ok(None)
-                }
-            };
+                        .map(Some),
+                    "delete" => match client.delete(&col, &key).await {
+                        Err(ClientError::Api { status: 404, .. }) => Ok(None),
+                        other => other.map(Some),
+                    },
+                    "event" => client
+                        .emit(&serde_json::from_str(&body)?)
+                        .await
+                        .map(|_| None),
+                    "widget" => {
+                        let w: serde_json::Value = serde_json::from_str(&body)?;
+                        let view = serde_json::from_value(w["view"].clone())?;
+                        client
+                            .push_widget(&key, w["title"].as_str().unwrap_or_default(), view)
+                            .await
+                            .map(|()| None)
+                    }
+                    "unwidget" => client.remove_widget(&key).await.map(|()| None),
+                    other => {
+                        tracing::warn!(kind = other, "dropping an unknown pending write");
+                        Ok(None)
+                    }
+                })
+            }
+            .await;
             let outcome = match sent {
-                Ok(doc) => Sent::Taken(doc),
-                Err(ClientError::Conflict { current }) => Sent::Conflict(current),
-                Err(ClientError::Api {
+                Err(err) => Sent::Rejected(format!(
+                    "This write was damaged on this computer and could not be sent ({err})"
+                )),
+                Ok(Ok(doc)) => Sent::Taken(doc),
+                Ok(Err(ClientError::Conflict { current })) => Sent::Conflict(current),
+                Ok(Err(ClientError::Api {
                     status: 400 | 413,
                     message,
                     ..
-                }) => Sent::Rejected(message),
-                Err(err) => return Err(err.into()),
+                })) => Sent::Rejected(message),
+                Ok(Err(err)) => return Err(err.into()),
             };
             let kept = self
                 .0
@@ -235,7 +239,7 @@ impl Link {
                             kept::hold_conflict(&tx, &col, &key, current.as_deref())?
                         }
                         Sent::Rejected(message) => {
-                            tracing::warn!(%kind, %message, "Sol rejected a write; keeping it aside");
+                            tracing::warn!(%kind, %message, "a write could not be sent; keeping it aside");
                             kept::hold_rejected(&tx, seq, &message)?;
                             true
                         }
@@ -359,6 +363,17 @@ impl Link {
 /// Runs a loop again when it panics (a bug, a handler that fell over), after
 /// a pause, so one bad moment never leaves the app without sync. The panic
 /// is in the log (see [`crate::telemetry`]).
+/// Keeps the settings Sol sent, writing them down only when they differ
+/// from the ones kept (an idle app checks every few minutes), and says
+/// whether they did.
+fn remember_settings(c: &rusqlite::Connection, settings: &str) -> rusqlite::Result<bool> {
+    let fresh = meta(c, "settings")?.as_deref() != Some(settings);
+    if fresh {
+        set_meta(c, "settings", settings)?;
+    }
+    Ok(fresh)
+}
+
 async fn keep_alive<F>(name: &'static str, make: impl Fn() -> F)
 where
     F: std::future::Future<Output = ()> + Send,
@@ -414,5 +429,30 @@ fn friendly(err: &anyhow::Error) -> String {
         }) => message.clone(),
         Some(ClientError::Api { message, .. }) => message.clone(),
         _ => err.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_settings_are_not_written_again() {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE writes (n INTEGER);
+             CREATE TRIGGER counted AFTER UPDATE ON meta BEGIN INSERT INTO writes VALUES (1); END;",
+        )
+        .unwrap();
+        let writes = |c: &rusqlite::Connection| -> i64 {
+            c.query_row("SELECT COUNT(*) FROM writes", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert!(remember_settings(&c, r#"{"a":1}"#).unwrap());
+        assert!(!remember_settings(&c, r#"{"a":1}"#).unwrap());
+        assert_eq!(writes(&c), 0, "the same settings were written again");
+        assert!(remember_settings(&c, r#"{"a":2}"#).unwrap());
+        assert_eq!(writes(&c), 1);
     }
 }
