@@ -8,7 +8,9 @@ change it together with the types in `src/` and Sol's handlers.
 
 - Sol (`hub/crates/sol`) uses the shapes, `db` and `telemetry`, without
   features (its tests use `app`). `kit/quick`, the template and every world
-  app use feature `app`, and their tests `testing` (through sol-quick's).
+  app use feature `app`; sol-quick-core (`kit/quick/core`) turns `testing`
+  on too, always (its test helpers are always built, so orbit is one build
+  for an app and its tests): what `testing` adds must stay additive.
 - They build against a **git tag** of this repository (`orbit = { git, tag }`),
   so an edit here reaches nothing until they point at this checkout:
   `hub/scripts/worlds.sh use-local` does it for `kit/quick`, the template
