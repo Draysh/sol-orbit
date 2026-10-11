@@ -13,7 +13,7 @@ change it together with the types in `src/` and Sol's handlers.
   so an edit here reaches nothing until they point at this checkout:
   `hub/scripts/worlds.sh use-local` does it for `kit/quick`, the template
   and the worlds (it is on now; leave it). The hub stays pinned to its tag.
-- Sol's tests (`hub/crates/sol/src/tests.rs`) drive the client and two `Link`
+- Sol's tests (`hub/crates/sol/src/tests/`) drive the client and two `Link`
   devices against a real Sol end to end. After changing either side, run
   them against this checkout without touching the hub's manifest: in `hub/`,
   `cargo test --workspace --config
@@ -48,7 +48,8 @@ Without features (the shapes, shared with Sol):
 - `link/mod.rs`: `Link`, its `Config`, `Status`, `Update`, `Handler`; events, widgets, the time zone.
 - `link/mod.rs` also: `LocalCopyError` (a copy that won't open: newer or damaged) and `set_aside`;
   waiting for a locked keyring at login.
-- `link/docs.rs`: documents in the local copy (`list`, `get`, `put` with the version it was made
+- `link/docs.rs`: documents in the local copy (`list`, `list_prefix` and `count` by the start of
+  their ids on the `(collection, id)` key, `get`, `put` with the version it was made
   on, `overwrite` without, `delete`, the typed `*_as`, and `list_counted`: rows with how many of
   another shape were left out, logged once when that count changes).
 - `link/kept.rs`: writes kept aside (`held` table): conflicts (a `409`, both copies), writes Sol
