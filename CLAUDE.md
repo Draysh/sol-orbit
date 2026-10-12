@@ -75,7 +75,8 @@ Without features (the shapes, shared with Sol):
 - `install.rs`, `updates.rs`: the app installing and updating itself: `verify_offer` (keys, the
   trusted comment's file, versions only up), a test start (`--version`, Qt major.minor), the switch
   keeping `<bin>.old` (fsynced), the trial (`.<bin>.trial`) and rollback (`.<bin>.rolled-back`).
-- `moons.rs`: moons started by their planet, leaving 5 s after it (they block on its lock);
+- `moons.rs`: a planet's "running" lock and starting a moon still written down for it but
+  not carried (`start_except`), kept for moons with an app of their own;
   `doors.rs`: opening other worlds' apps.
 
 `testing` (`app` plus test helpers, for tests here and in the worlds):

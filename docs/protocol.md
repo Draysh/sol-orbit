@@ -82,6 +82,7 @@ added under Worlds → Add a world from GitHub.
 | `role` | | The same in a word or three (`Habits and diary`), shown under its name in the app menu and the tray |
 | `repo` | yes | `owner/name` on GitHub, where its releases are |
 | `parent` | | The planet a moon belongs to, e.g. `neptune` for Triton |
+| `app` | | The world whose app carries this one (its `parent`), for a moon with no app of its own: Sol offers no download for it |
 | `min_sol` | | The oldest Sol version the world works with (`1.2.0`) |
 | `protocol` | | The protocol its app speaks |
 | `collections` | | `{ id, label }`: what it keeps in Sol, named for the data overview |
@@ -127,6 +128,7 @@ binary), and an `.AppImage` if a release has one; other files (`.sig`,
 | --- | --- | --- |
 | `POST /api/v1/pair` | `PairRequest` | `200` `PairStarted` |
 | `POST /api/v1/pair/claim?wait=S` | `PairClaim` | `200` `Paired`, `202` `Pending`, `410` |
+| `POST /api/v1/pair/carried` (the planet's token) | `PairRequest` | `200` `Paired`, `403`, `404` |
 | `GET /api/v1/me` | | `200` `DeviceMe` |
 | `DELETE /api/v1/me` | | `204`: this device is unpaired |
 
@@ -156,6 +158,12 @@ binary), and an `.AppImage` if a release has one; other files (`.sig`,
 3. The app polls `POST /api/v1/pair/claim?wait=25` (Sol waits up to `S` ≤ 25
    seconds for the approval). `202` means not yet; `200` carries the token,
    once; `410` means it expired, was declined or is unknown: start again.
+
+A moon carried in its planet's app (its manifest's `app`) pairs without a
+code: the planet's app, once paired, sends `POST /api/v1/pair/carried` with
+its own token and the moon's `PairRequest`, and gets the moon's `Paired` at
+once, for the same person. `403` when the world isn't a moon of the asking
+device's world.
 
 Sol keeps at most 20 open requests, 5 from one address; past that `pair` is
 `429`. Ten failed attempts (unknown worlds, wrong secrets) from one address in

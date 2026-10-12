@@ -24,6 +24,11 @@ pub struct WorldManifest {
     /// The planet a moon belongs to, e.g. `neptune` for Triton.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The world whose app carries this one, for a moon that has no app of
+    /// its own (its pages are in its planet's): its `parent`. Sol offers no
+    /// download for it, and lets the planet's paired device pair it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
     /// What it keeps in Sol, for the data overview.
     #[serde(default)]
     pub collections: Vec<Collection>,
@@ -214,6 +219,9 @@ impl WorldManifest {
         if !repo_ok {
             out.push(format!("repo {:?} should be owner/name", self.repo));
         }
+        if self.app.is_some() && self.app != self.parent {
+            out.push("app, when set, is the planet the moon belongs to (its parent)".into());
+        }
         for e in &self.emits {
             if !crate::event::valid_type(&self.id, &e.kind) {
                 out.push(format!(
@@ -321,6 +329,19 @@ mod tests {
         );
         assert!(manifest().action("tick-habit").is_some());
         assert_eq!(manifest().role.as_deref(), Some("Habits and diary"));
+    }
+
+    #[test]
+    fn a_carried_moon_names_its_planet() {
+        let mut m = manifest();
+        m.parent = Some("neptune".into());
+        m.app = Some("neptune".into());
+        assert!(m.problems().is_empty(), "{:?}", m.problems());
+        m.app = Some("terra".into());
+        assert_eq!(m.problems().len(), 1);
+        let back: WorldManifest =
+            serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back.app.as_deref(), Some("terra"));
     }
 
     #[test]

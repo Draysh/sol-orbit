@@ -39,12 +39,12 @@ with Sol, the way a music player pairs with a Navidrome server.
   binary is started (`--version`, its Qt too) before it goes in, the old one
   stays as `<bin>.old`, and a new version that never comes up is rolled back
   on the next start.
-- **`orbit::moons`** (feature `app`): moons that run by themselves. An
-  installed moon writes down where it is; its planet's app starts it with
-  `--background` (no window) whenever the planet starts and holds a lock the
-  moon waits on, and the moon leaves about five seconds after the planet
-  does (or crashes). Nobody
-  has to remember to open Titan, Luna or Triton for their work to happen.
+- **`orbit::moons`** (feature `app`): moons beside their planet. Every moon
+  is carried in its planet's app now; what a moon with an app of its own
+  may still use stays: the planet holds a "running" lock while it runs
+  (such a moon left when it let go), starts any moon still written down
+  for it but those it carries, with `--background` (no window), and
+  uninstalling takes a moon off the list.
 - **`orbit::doors`** (feature `app`): which Sol apps are installed on the
   computer, and opening one from another.
 

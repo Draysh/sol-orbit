@@ -55,6 +55,32 @@ impl Link {
         Ok(self.status())
     }
 
+    /// Pairs this world (a moon) through `planet`, the paired world whose
+    /// app carries it: no code, the person approved the planet already.
+    /// Nothing happens when this one is paired or pairing.
+    pub async fn pair_through(&self, planet: &Link) -> anyhow::Result<Status> {
+        if !matches!(*self.lock(), State::Unpaired { .. }) {
+            return Ok(self.status());
+        }
+        let (Some(client), Some(server)) = (planet.client(), planet.server()) else {
+            bail!("{} isn't paired with Sol yet", planet.world());
+        };
+        let paired = match client
+            .pair_carried(
+                &self.0.cfg.world,
+                &self.0.cfg.device,
+                self.0.cfg.platform.as_deref(),
+            )
+            .await
+        {
+            Ok(paired) => paired,
+            Err(ClientError::Api { message, .. }) => bail!("Sol says: {message}"),
+            Err(err) => return Err(err.into()),
+        };
+        self.finish(&server, paired).await?;
+        Ok(self.status())
+    }
+
     /// Stops a pairing that hasn't been approved.
     pub fn cancel(&self) {
         if matches!(*self.lock(), State::Pairing { .. }) {

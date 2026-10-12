@@ -1,24 +1,19 @@
-//! Moons that run by themselves.
+//! Moons beside their planet.
 //!
 //! A moon is a world that works for another, its planet (`parent` in its
 //! manifest): Titan learns from what Saturn watched, Triton makes stations
-//! for Neptune, Luna keeps Terra's evenings. What a moon does arrives as
-//! deliveries in its inbox, so it has to be running for anything to happen,
-//! and nobody should have to remember to open it. So:
+//! for Neptune, Luna keeps Terra's evenings. Today every moon is carried in
+//! its planet's app (its pages in the planet's window, its work in the
+//! planet's process). Moons that had an app of their own wrote down where
+//! it was in a folder every Sol app on the computer shares, and waited on
+//! their planet's "running" lock to leave a few seconds after it; this module
+//! keeps what such an app may still use:
 //!
-//! - an installed moon writes down where it is ([`settle`]) in a folder
-//!   every Sol app on the computer shares;
-//! - its planet's app, at start-up, holds a lock for as long as it runs and
-//!   starts every moon written down for it with [`BACKGROUND`] ([`start`]);
-//! - the moon, started that way, opens no window. It syncs and acts on what
-//!   Sol delivers like any copy, and leaves a few seconds after its planet
-//!   does ([`planet_gone`]: it waits on the planet's lock, so it hears at
-//!   once, even when the planet crashed). Opened from the app menu it shows
-//!   its window, and while its planet runs, closing the window leaves it
-//!   working.
-//!
-//! The person can keep a moon from running with its planet on a computer
-//! ([`set_enabled`]); it's on until then.
+//! - a planet's app, at start-up, holds that lock for as long as it runs and
+//!   starts every moon still written down for it, but those it carries,
+//!   with [`BACKGROUND`] ([`start_except`]);
+//! - [`in_background`] tells such a start (no window, just the work);
+//! - uninstalling takes a moon off every list ([`unsettle`]).
 
 use std::{
     fs::{File, OpenOptions, TryLockError},
@@ -27,20 +22,12 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Context;
 use serde::{Deserialize, Serialize};
-
-use crate::install::{self, App, Here};
 
 /// The argument a planet starts its moons with: no window, just the work.
 pub const BACKGROUND: &str = "--background";
 
-/// How long a moon stays after its planet left, in case it is only starting
-/// again (after an update); what the planet did last waits for the moon in
-/// Sol's inbox either way.
-const GRACE: Duration = Duration::from_secs(5);
-
-/// What a moon writes down for its planet.
+/// What a moon with an app of its own wrote down for its planet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Entry {
     /// The moon's installed binary.
@@ -65,11 +52,13 @@ pub fn in_background() -> bool {
 
 /// For a planet, at start-up: marks it as running for as long as the
 /// returned value lives (keep it for the app's whole life), and starts each
-/// of its moons in the background. A moon already running stays as it is.
-pub fn start(world: &str) -> Option<Running> {
+/// of its moons written down for it in the background, leaving out the
+/// moons this app carries itself (their pages are in its window, their work
+/// in its process). A moon already running stays as it is.
+pub fn start_except(world: &str, carried: &[&str]) -> Option<Running> {
     let base = base()?;
     let running = hold(&base, world);
-    for bin in moons_of(&base, world) {
+    for bin in moons_to_start(&base, world, carried) {
         if let Err(err) = spawn(&bin, &[BACKGROUND]) {
             tracing::warn!(moon = %bin.display(), error = ?err, "couldn't start a moon");
         }
@@ -80,75 +69,6 @@ pub fn start(world: &str) -> Option<Running> {
 /// Whether `world`'s app is running on this computer.
 pub fn running(world: &str) -> bool {
     base().is_some_and(|base| is_running(&base, world))
-}
-
-/// For a moon in the background: resolves a few seconds after its planet
-/// stopped running (quit, was stopped, or crashed), unless it came back.
-pub async fn planet_gone(parent: &str) {
-    if let Some(base) = base() {
-        planet_gone_in(&base, parent, GRACE).await;
-    }
-}
-
-async fn planet_gone_in(base: &Path, parent: &str, grace: Duration) {
-    loop {
-        let lock = lock_path(base, parent);
-        // Blocks while the planet holds its lock, and returns as soon as it
-        // lets go: the system releases it when the planet's process ends.
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Ok(file) = File::open(&lock)
-                && file.lock_shared().is_ok()
-            {
-                let _ = file.unlock();
-            }
-        })
-        .await;
-        tokio::time::sleep(grace).await;
-        if !is_running(base, parent) {
-            return;
-        }
-    }
-}
-
-/// For a moon, at start-up: writes down where its installed binary is, so
-/// its planet can start it. Development builds and copies that were never
-/// installed are left out.
-pub fn settle(app: &App, parent: &str) {
-    let Here::Installed { path, .. } = install::here(app) else {
-        return;
-    };
-    let Some(base) = base() else { return };
-    if let Err(err) = settle_in(&base, parent, app.world, path) {
-        tracing::warn!(error = ?err, "couldn't tell the planet where this moon is");
-    }
-}
-
-/// For a moon just installed from a terminal (`--install`): writes down the
-/// installed binary, as [`settle`] does when it starts.
-pub fn settle_installed(app: &App, parent: &str, bin: &Path) {
-    let Some(base) = base() else { return };
-    if let Err(err) = settle_in(&base, parent, app.world, bin.to_owned()) {
-        tracing::warn!(error = ?err, "couldn't tell the planet where this moon is");
-    }
-}
-
-/// Whether the moon runs with its planet on this computer; `None` when this
-/// copy can't (a development build, or one that isn't installed).
-pub fn enabled(app: &App, parent: &str) -> Option<bool> {
-    if !matches!(install::here(app), Here::Installed { .. }) {
-        return None;
-    }
-    let base = base()?;
-    Some(read(&entry_path(&base, parent, app.world)).is_none_or(|e| e.on))
-}
-
-/// Lets the moon run with its planet on this computer, or not.
-pub fn set_enabled(app: &App, parent: &str, on: bool) -> anyhow::Result<()> {
-    let Here::Installed { path, .. } = install::here(app) else {
-        anyhow::bail!("only an installed copy runs with its planet");
-    };
-    let base = base().context("no data folder to write to")?;
-    write(&entry_path(&base, parent, app.world), &Entry { path, on })
 }
 
 /// Takes the moon off every planet's list; for uninstalling.
@@ -175,10 +95,6 @@ pub(crate) fn base() -> Option<PathBuf> {
     data.map(|d| d.join("sol-worlds"))
 }
 
-fn entry_path(base: &Path, parent: &str, moon: &str) -> PathBuf {
-    base.join("moons").join(parent).join(format!("{moon}.json"))
-}
-
 fn lock_path(base: &Path, world: &str) -> PathBuf {
     base.join("running").join(format!("{world}.lock"))
 }
@@ -187,22 +103,15 @@ fn read(path: &Path) -> Option<Entry> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
-/// Writes the entry unless the file already says exactly that.
-fn write(path: &Path, entry: &Entry) -> anyhow::Result<()> {
-    if read(path).as_ref() == Some(entry) {
-        return Ok(());
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    std::fs::write(path, serde_json::to_vec_pretty(entry)?)
-        .with_context(|| format!("writing {}", path.display()))
-}
-
-fn settle_in(base: &Path, parent: &str, moon: &str, path: PathBuf) -> anyhow::Result<()> {
-    let file = entry_path(base, parent, moon);
-    let on = read(&file).is_none_or(|e| e.on);
-    write(&file, &Entry { path, on })
+/// The moons a planet starts: its settled ones but those it carries.
+fn moons_to_start(base: &Path, world: &str, carried: &[&str]) -> Vec<PathBuf> {
+    moons_of(base, world)
+        .into_iter()
+        .filter(|bin| {
+            let name = bin.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            !carried.iter().any(|m| name == format!("sol-{m}"))
+        })
+        .collect()
 }
 
 /// The binaries of the moons that run with `world`.
@@ -283,6 +192,21 @@ pub(crate) fn spawn(bin: &Path, args: &[&str]) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// What a moon with an app of its own wrote down for `parent`.
+    fn settle(base: &Path, parent: &str, moon: &str, path: &Path, on: bool) {
+        let dir = base.join("moons").join(parent);
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = Entry {
+            path: path.to_owned(),
+            on,
+        };
+        std::fs::write(
+            dir.join(format!("{moon}.json")),
+            serde_json::to_vec(&entry).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn a_planet_finds_its_settled_moons() {
         let dir = tempfile::tempdir().unwrap();
@@ -291,91 +215,43 @@ mod tests {
         std::fs::write(&bin, b"").unwrap();
 
         assert!(moons_of(base, "saturn").is_empty());
-        settle_in(base, "saturn", "titan", bin.clone()).unwrap();
+        settle(base, "saturn", "titan", &bin, true);
         assert_eq!(moons_of(base, "saturn"), vec![bin.clone()]);
         assert!(moons_of(base, "terra").is_empty());
 
-        // Turned off, it stays off when it settles again.
-        let file = entry_path(base, "saturn", "titan");
-        write(
-            &file,
-            &Entry {
-                path: bin.clone(),
-                on: false,
-            },
-        )
-        .unwrap();
-        settle_in(base, "saturn", "titan", bin.clone()).unwrap();
+        // One turned off stays where it is.
+        settle(base, "saturn", "titan", &bin, false);
         assert!(moons_of(base, "saturn").is_empty());
-        assert!(!read(&file).unwrap().on);
 
         // A moon whose binary is gone is skipped.
-        write(
-            &file,
-            &Entry {
-                path: bin.clone(),
-                on: true,
-            },
-        )
-        .unwrap();
+        settle(base, "saturn", "titan", &bin, true);
         std::fs::remove_file(&bin).unwrap();
         assert!(moons_of(base, "saturn").is_empty());
     }
 
     #[test]
-    fn settling_again_writes_nothing() {
+    fn a_planet_never_starts_a_moon_it_carries() {
         let dir = tempfile::tempdir().unwrap();
         let base = dir.path();
-        settle_in(base, "neptune", "triton", base.join("sol-triton")).unwrap();
-        let file = entry_path(base, "neptune", "triton");
-        // Dated long ago, so a write now would show without waiting for the clock.
-        let long_ago = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
-        std::fs::File::options()
-            .write(true)
-            .open(&file)
-            .unwrap()
-            .set_modified(long_ago)
-            .unwrap();
-        settle_in(base, "neptune", "triton", base.join("sol-triton")).unwrap();
-        assert_eq!(
-            std::fs::metadata(&file).unwrap().modified().unwrap(),
-            long_ago
-        );
+        let titan = base.join("sol-titan");
+        std::fs::write(&titan, b"").unwrap();
+        settle(base, "saturn", "titan", &titan, true);
+        assert_eq!(moons_to_start(base, "saturn", &[]), vec![titan.clone()]);
+        assert!(moons_to_start(base, "saturn", &["titan"]).is_empty());
+        assert_eq!(moons_to_start(base, "saturn", &["luna"]), vec![titan]);
     }
 
-    #[tokio::test]
-    async fn a_moon_hears_its_planet_leave_at_once() {
+    #[test]
+    fn an_entry_written_before_on_existed_is_on() {
         let dir = tempfile::tempdir().unwrap();
-        let base = dir.path().to_owned();
-        let held = hold(&base, "terra").expect("the lock");
-        let gone = tokio::spawn({
-            let base = base.clone();
-            async move { planet_gone_in(&base, "terra", Duration::from_millis(40)).await }
-        });
-        // Longer than the grace: a moon that didn't wait on the lock would be gone.
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        assert!(!gone.is_finished(), "the planet still runs");
-        let left = std::time::Instant::now();
-        drop(held);
-        tokio::time::timeout(Duration::from_secs(2), gone)
-            .await
-            .expect("the moon heard within the grace")
-            .unwrap();
-        assert!(left.elapsed() < Duration::from_secs(1));
-
-        // A planet that starts again within the grace keeps its moon.
-        let held = hold(&base, "terra").expect("the lock");
-        let gone = tokio::spawn({
-            let base = base.clone();
-            async move { planet_gone_in(&base, "terra", Duration::from_millis(250)).await }
-        });
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        drop(held);
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let _again = hold(&base, "terra").expect("the lock again");
-        // Past the grace: the moon looked, found its planet back, and waits again.
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert!(!gone.is_finished(), "the planet came back");
+        let base = dir.path();
+        let bin = base.join("sol-luna");
+        std::fs::write(&bin, b"").unwrap();
+        let folder = base.join("moons").join("terra");
+        std::fs::create_dir_all(&folder).unwrap();
+        let json = serde_json::json!({ "path": bin });
+        std::fs::write(folder.join("luna.json"), json.to_string()).unwrap();
+        assert_eq!(moons_of(base, "terra"), vec![bin]);
     }
 
     #[test]

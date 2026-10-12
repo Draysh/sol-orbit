@@ -396,6 +396,13 @@ impl Link {
         }
     }
 
+    /// Which link this is, among those open in the process: the same for
+    /// every clone of it. (A closed link's number may come back for a new
+    /// one; what keeps by it also follows the link's news, which closes.)
+    pub fn identity(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
     pub fn world(&self) -> &str {
         &self.0.cfg.world
     }

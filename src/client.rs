@@ -115,6 +115,24 @@ impl Sol {
         json(self.req(Method::POST, "/api/v1/pair").json(&body)).await
     }
 
+    /// Pairs `world`, a moon this device's app carries, on the strength of
+    /// this device's own pairing (its planet's): no code to approve, the
+    /// moon's token at once. Sol checks that `world`'s planet is this
+    /// device's world.
+    pub async fn pair_carried(
+        &self,
+        world: &str,
+        device: &str,
+        platform: Option<&str>,
+    ) -> Result<Paired> {
+        let body = PairRequest {
+            world: world.into(),
+            device: device.into(),
+            platform: platform.map(Into::into),
+        };
+        json(self.req(Method::POST, "/api/v1/pair/carried").json(&body)).await
+    }
+
     /// Asks whether the person approved the pairing yet, waiting up to `wait`
     /// (Sol caps it at 25 s). `None` while it is still pending.
     pub async fn claim(&self, started: &PairStarted, wait: Duration) -> Result<Option<Paired>> {

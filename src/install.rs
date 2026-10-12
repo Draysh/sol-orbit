@@ -155,6 +155,32 @@ pub fn uninstall(app: &App) -> anyhow::Result<()> {
     }
 }
 
+/// For a planet whose app now carries `moon`: takes the moon's own
+/// installed app away (its menu entry, icons, its place on the planet's
+/// list) and leaves `~/.local/bin/<moon's binary>` as a link to `planet`,
+/// so whatever starts the moon by name (the desktop's commands, an older
+/// planet, another app's door) reaches the planet's app. The moon's data,
+/// its token and its settings stay. True when there was something to take
+/// away; false when it had been done.
+pub fn uninstall_other(moon: &App, planet: &Path) -> anyhow::Result<bool> {
+    let Some(bin) = linux::bin(moon) else {
+        return Ok(false);
+    };
+    let linked = std::fs::read_link(&bin).is_ok_and(|to| to == planet);
+    if linked && !linux::has_entry(moon) {
+        return Ok(false);
+    }
+    crate::moons::unsettle(moon.world);
+    linux::remove(moon)?;
+    if let Some(dir) = bin.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(planet, &bin)
+        .with_context(|| format!("linking {} to {}", bin.display(), planet.display()))?;
+    Ok(true)
+}
+
 /// Starts `bin` once this process has quit (call, then quit).
 pub fn relaunch(bin: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
@@ -542,6 +568,11 @@ mod linux {
                 .status();
         }
         Ok(())
+    }
+
+    /// Whether the app has its menu entry.
+    pub fn has_entry(app: &App) -> bool {
+        entry(app).is_some_and(|p| p.exists())
     }
 
     pub fn remove(app: &App) -> anyhow::Result<()> {

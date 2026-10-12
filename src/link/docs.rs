@@ -75,11 +75,32 @@ impl Link {
         prefix: &str,
     ) -> anyhow::Result<Vec<(String, T)>> {
         Ok(self
-            .list_prefix(collection, prefix)
+            .texts(collection, prefix)
             .await?
             .into_iter()
-            .filter_map(|d| Some((d.id, serde_json::from_value(d.data).ok()?)))
+            .filter_map(|(id, text)| Some((id, serde_json::from_str(&text).ok()?)))
             .collect())
+    }
+
+    /// The live documents whose id starts with `prefix` (`""` for all), by
+    /// id, as their ids and stored text: read as `T` straight from the text,
+    /// with no `Value` between and no times parsed.
+    async fn texts(&self, collection: &str, prefix: &str) -> anyhow::Result<Vec<(String, String)>> {
+        let (collection, from, to) = (collection.to_owned(), prefix.to_owned(), past(prefix));
+        Ok(self
+            .0
+            .db
+            .call(move |c| {
+                c.prepare_cached(
+                    "SELECT id, data FROM docs WHERE collection = ?1 AND id >= ?2 AND id < ?3
+                     AND deleted = 0 ORDER BY id",
+                )?
+                .query_map(params![collection, from, to], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await??)
     }
 
     /// How many live documents a collection has whose id starts with
@@ -142,12 +163,12 @@ impl Link {
         let mut rows = Vec::new();
         let mut unreadable = 0;
         let mut first = None;
-        for d in self.list(collection).await? {
-            match serde_json::from_value(d.data) {
-                Ok(t) => rows.push((d.id, t)),
+        for (id, text) in self.texts(collection, "").await? {
+            match serde_json::from_str(&text) {
+                Ok(t) => rows.push((id, t)),
                 Err(e) => {
                     unreadable += 1;
-                    first.get_or_insert((d.id, e));
+                    first.get_or_insert((id, e));
                 }
             }
         }
